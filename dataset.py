@@ -45,6 +45,11 @@ from torchvision import datasets, transforms
 from PIL import Image
 
 
+def _pin_memory() -> bool:
+    """pin_memory is only beneficial (and supported) on CUDA, not MPS or CPU."""
+    return torch.cuda.is_available()
+
+
 # ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------
@@ -102,6 +107,8 @@ def cub200_transforms():
     return train_tf, val_tf
 
 
+# 추가적인 데이터셋 사용 가능 
+
 # ---------------------------------------------------------------------------
 # CIFAR-100
 # ---------------------------------------------------------------------------
@@ -112,9 +119,9 @@ def get_cifar100(data_root: str = './data', batch_size: int = 128,
     train_ds = datasets.CIFAR100(data_root, train=True,  download=True, transform=train_tf)
     val_ds   = datasets.CIFAR100(data_root, train=False, download=True, transform=val_tf)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=_pin_memory())
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=_pin_memory())
     return train_loader, val_loader
 
 
@@ -164,9 +171,9 @@ def get_tinyimagenet(data_root: str = './data', batch_size: int = 128,
     train_ds = datasets.ImageFolder(root / 'train', transform=train_tf)
     val_ds   = datasets.ImageFolder(root / 'val',   transform=val_tf)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=_pin_memory())
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=_pin_memory())
     return train_loader, val_loader
 
 
@@ -248,9 +255,9 @@ def get_cub200(data_root: str = './data', batch_size: int = 64,
     train_ds = CUB200Dataset(root, train=True,  transform=train_tf)
     val_ds   = CUB200Dataset(root, train=False, transform=val_tf)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=_pin_memory())
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=_pin_memory())
     return train_loader, val_loader
 
 
