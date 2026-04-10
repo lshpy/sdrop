@@ -1,190 +1,248 @@
 # Suppressive Dropout (SDrop)
-### An Explainable Channel-Selective Regularization Method for Preserving Rare Features
+**An Explainable Channel-Selective Regularization Method for Preserving Rare Features**
 
-**Seunghyun Lee** — Korea University, Department of Industrial Management Engineering  
+Seunghyun Lee — Korea University  
 *Submitted to Neurocomputing (Elsevier), 2026*
 
 ---
 
-## Overview
+## Quick Summary
 
-Deep learning models overfit to **dominant features** (strong textures, backgrounds, high-energy activations), suppressing rare but informative patterns. This mirrors **lateral inhibition** in neuroscience — strongly activated neurons suppress neighbors via Local Response Normalization (LRN).
+SDrop drops the **most dominant channels** during training instead of random or weak ones.  
+The key insight: high-energy, diffuse channels monopolize the feature space via lateral inhibition, starving minority-class detectors of gradient signal.
 
-**SDrop inverts the conventional dropout assumption:**
-> All prior methods treat high activation as a proxy for importance.  
-> SDrop argues the opposite: the most dominant channels are *harmful* — they monopolize the feature space and starve minority-class detectors of gradient signal.
-
-| Method | Strategy |
-|--------|----------|
-| Standard Dropout | Drop randomly |
-| Targeted Dropout | Drop *weakest* channels |
-| SE-Net / CBAM | *Amplify* dominant channels |
-| **SDrop (ours)** | **Drop the *strongest* over-inhibitory channels** |
+| Method | What it drops | Score |
+|--------|--------------|-------|
+| Dropout | random | — |
+| Targeted Dropout | *weakest* channels | low magnitude |
+| **SDrop** | ***strongest*** channels | EGPG = $E_c(1-P_c)$ |
+| **SDropEnergy** | ***strongest*** channels | $E_c$ only |
+| **SGridLC** | strongest per spatial cell | EGPG per grid cell |
 
 ---
 
-## Method
+## Repository Structure
+
+```
+sdrop-neurocomputing/
+├── sdrop.py        ← SDrop, SDropEnergy, SGridLC modules + factory
+├── model.py        ← ResNet-18/50 with SDrop at L3/L4
+├── dataset.py      ← CIFAR-100, TinyImageNet, CUB-200-2011 loaders
+├── train.py        ← training script (CLI)
+├── evaluate.py     ← evaluation: Acc, F1, AUC, ECE
+└── vis_*.png       ← EGPG score visualizations from the paper
+```
+
+---
+
+## Environment Setup
+
+```bash
+pip install torch torchvision scikit-learn numpy
+```
+
+Tested with: Python 3.10, PyTorch 2.x, CUDA 11.8+
+
+---
+
+## Dataset Setup
+
+### 1. CIFAR-100
+**Auto-downloads.** No setup needed.
+
+```bash
+python train.py --dataset cifar100 --method none   # downloads automatically
+```
+
+---
+
+### 2. TinyImageNet
+
+**Step 1:** Download and extract
+
+```bash
+cd data/
+wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
+unzip tiny-imagenet-200.zip
+```
+
+**Step 2:** Reformat validation set (run once)
+
+```python
+from dataset import reformat_tinyimagenet_val
+reformat_tinyimagenet_val('./data')
+```
+
+Expected structure after reformatting:
+```
+data/tiny-imagenet-200/
+├── train/
+│   ├── n01443537/
+│   │   └── *.JPEG
+│   └── ...
+└── val/
+    ├── n01443537/      ← created by reformat_tinyimagenet_val()
+    │   └── *.JPEG
+    └── ...
+```
+
+---
+
+### 3. CUB-200-2011 (Priority — add for Neurocomputing submission)
+
+**Step 1:** Download
+
+```
+URL: https://www.vision.caltech.edu/datasets/cub_200_2011/
+File: CUB_200_2011.tgz  (~1.1 GB)
+```
+
+**Step 2:** Extract
+
+```bash
+tar -xzf CUB_200_2011.tgz -C data/
+```
+
+Expected structure:
+```
+data/CUB_200_2011/
+├── images/
+│   ├── 001.Black_footed_Albatross/
+│   │   └── Black_Footed_Albatross_*.jpg
+│   └── ...  (200 classes)
+├── images.txt
+├── image_class_labels.txt
+├── train_test_split.txt
+└── classes.txt
+```
+
+**No further preprocessing needed.**  
+Train/test split is read from `train_test_split.txt` (5,994 train / 5,794 test).
+
+---
+
+## Running Experiments
+
+### Replicate paper results
+
+```bash
+# --- CIFAR-100: best result (+0.77%p) ---
+python train.py --dataset cifar100 --method sdrop_energy --drop_rate 0.1 --layers L4
+
+# --- CIFAR-100: baseline ---
+python train.py --dataset cifar100 --method none
+
+# --- CIFAR-100: standard dropout ---
+python train.py --dataset cifar100 --method dropout --drop_rate 0.1 --layers L4
+python train.py --dataset cifar100 --method dropout --drop_rate 0.3 --layers L4
+
+# --- TinyImageNet: best result (+0.04%p) ---
+python train.py --dataset tinyimagenet --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 4
+```
+
+### Run 3 seeds (as in paper: mean ± std)
+
+```bash
+for seed in 0 1 2; do
+  python train.py \
+    --dataset cifar100 \
+    --method sdrop_energy \
+    --drop_rate 0.1 \
+    --layers L4 \
+    --seed $seed
+done
+```
+
+### CUB-200-2011 (new — to be run)
+
+```bash
+# Baseline
+python train.py --dataset cub200 --method none --epochs 60 --lr 0.01
+
+# SDrop_Energy (recommended first run)
+python train.py --dataset cub200 --method sdrop_energy --drop_rate 0.1 --layers L4 --epochs 60 --lr 0.01
+
+# SGridLC G=2
+python train.py --dataset cub200 --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 2 --epochs 60 --lr 0.01
+
+# SGridLC G=4
+python train.py --dataset cub200 --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 4 --epochs 60 --lr 0.01
+```
+
+> **Note on CUB:** Uses ImageNet-pretrained ResNet-50 by default (strongly recommended for fine-grained tasks). lr=0.01 instead of 0.1.
+
+---
+
+## Full Experiment Grid
+
+### CIFAR-100 (ResNet-18, 200 epochs, lr=0.1)
+
+| Method | Rate | Layer | Grid | Acc (%) | Status |
+|--------|------|-------|------|---------|--------|
+| Baseline | 0.0 | — | — | 76.65 ± 0.11 | done |
+| Dropout | 0.1 | L4 | — | 76.78 ± 0.11 | done |
+| Dropout | 0.3 | L4 | — | 76.41 ± 0.09 | done |
+| SDrop | 0.1 | L4 | — | 76.91 ± 0.13 | done |
+| **SDrop_Energy** | **0.1** | **L4** | **—** | **77.42 ± 0.16** | done ✓ best |
+| SGridLC | 0.1 | L3 | 2 | 76.76 ± 0.20 | done |
+
+### TinyImageNet (ResNet-50, 200 epochs, lr=0.1)
+
+| Method | Rate | Layer | Grid | Acc (%) | Status |
+|--------|------|-------|------|---------|--------|
+| Baseline | 0.0 | — | — | 48.62 ± 0.03 | done |
+| Dropout | 0.3 | L3 | — | 48.55 ± 0.25 | done |
+| SDrop_Energy | 0.1 | L3 | — | 48.54 ± 0.21 | done |
+| **SGridLC** | **0.3** | **L3** | **4** | **48.66 ± 0.42** | done ✓ best |
+| SGridLC | 0.1 | L3 | 4 | 32.34 ± 27.58 | done ⚠️ unstable |
+
+### CUB-200-2011 (ResNet-50 pretrained, 60 epochs, lr=0.01) — TODO
+
+| Method | Rate | Layer | Grid | Acc (%) | Status |
+|--------|------|-------|------|---------|--------|
+| Baseline | 0.0 | — | — | TBD | pending |
+| Dropout | 0.1 | L4 | — | TBD | pending |
+| Dropout | 0.3 | L4 | — | TBD | pending |
+| SDrop | 0.1 | L4 | — | TBD | pending |
+| SDrop_Energy | 0.1 | L4 | — | TBD | pending |
+| SDrop_Energy | 0.3 | L4 | — | TBD | pending |
+| SGridLC | 0.1 | L3 | 2 | TBD | pending |
+| SGridLC | 0.3 | L3 | 2 | TBD | pending |
+| SGridLC | 0.3 | L3 | 4 | TBD | pending |
+
+---
+
+## Method Reference
 
 ### EGPG Score
 
-Each channel $c$ is scored by its suppressive influence:
-
 $$s_c = E_c \cdot (1 - P_c)$$
 
-- **Channel Energy** $E_c = 1 - \left(1 + \gamma \cdot \frac{1}{HW}\sum_{h,w} x_{c,h,w}^2\right)^{-\delta}$ — suppression potential
-- **Spatial Peakedness** $P_c = \frac{\max_{h,w}|x_{c,h,w}|}{\sum_{h,w}|x_{c,h,w}| + \epsilon}$ — activation concentration
+**Channel Energy** (suppression potential):
+$$E_c = 1 - \left(1 + \gamma \cdot \frac{1}{HW}\sum_{h,w} x_{c,h,w}^2\right)^{-\delta}$$
 
-High $s_c$ = high energy **and** diffuse spatial spread → over-inhibitory → preferentially dropped.
+**Spatial Peakedness** (activation concentration):
+$$P_c = \frac{\max_{h,w}|x_{c,h,w}|}{\sum_{h,w}|x_{c,h,w}| + \epsilon}$$
 
-### Drop Probability
-
+**Drop probability**:
 $$p_{\text{drop},c} = p_{\text{base}} \cdot \frac{s_c}{\max_c s_c}$$
 
-### SGridLC (Spatially-Aware Extension)
+High $s_c$ = high energy **and** diffuse spread → over-inhibitory → preferentially dropped.
 
-Partitions the feature map $X \in \mathbb{R}^{C \times H \times W}$ into a $G \times G$ spatial grid. Each cell $(i,j)$ computes independent local scores $s_c^{(i,j)}$, separating object and background treatment.
+### SGridLC
 
-### Architecture
-
-SDrop is inserted at **Layer 3 (L3)** and **Layer 4 (L4)** of a ResNet backbone:
-
-```
-Input → L1(64ch) → L2(128ch) → L3(256ch)[SDrop] → L4(512ch)[SDrop] → FC
-```
+Partitions feature map into $G \times G$ cells. Each cell computes independent EGPG scores → independent drop mask. Separates object (low suppression) from background (high suppression) regions.
 
 ---
 
-## Experimental Results
+## Checkpoints & Logs
 
-### Setup
+Saved to `./checkpoints/`:
+- `{run_id}_best.pth` — best validation accuracy checkpoint
+- `{run_id}_history.csv` — per-epoch metrics (loss, acc, F1, AUC, ECE)
 
-| Dataset | Resolution | Train / Val | Backbone | Epochs | Optimizer |
-|---------|-----------|-------------|----------|--------|-----------|
-| CIFAR-100 | 32×32 | 50,000 / 10,000 | ResNet-18 | — | SGD, lr=0.1, cos anneal |
-| TinyImageNet | 64×64 | 100,000 / 10,000 | ResNet-50 | — | SGD, lr=0.1, cos anneal |
-
-- Momentum = 0.9, weight decay = 5×10⁻⁴, batch size = 128, standard augmentation
-- Results: **mean ± std over 3 runs**
-
----
-
-### CIFAR-100 Results
-
-| Method | Rate | Layer | Grid | Accuracy (%) |
-|--------|------|-------|------|-------------|
-| Baseline | 0.0 | — | — | 76.65 ± 0.11 |
-| Dropout | 0.1 | L3 | — | 76.56 ± 0.06 |
-| Dropout | 0.1 | L4 | — | 76.78 ± 0.11 |
-| Dropout | 0.3 | L3 | — | 76.53 ± 0.39 |
-| Dropout | 0.3 | L4 | — | 76.41 ± 0.09 |
-| SDrop | 0.1 | L4 | — | 76.91 ± 0.13 |
-| **SDrop_Energy** | **0.1** | **L4** | **—** | **77.42 ± 0.16** |
-| SDrop_Energy | 0.3 | L3 | — | 76.05 ± 0.19 |
-| SGridLC | 0.1 | L3 | 2 | 76.76 ± 0.20 |
-| SGridLC | 0.3 | L4 | 2 | 76.52 ± 0.08 |
-
-**Best: SDrop_Energy (Rate 0.1, L4) = 77.42% (+0.77%p over baseline)**
-
----
-
-### TinyImageNet Results
-
-| Method | Rate | Layer | Grid | Accuracy (%) |
-|--------|------|-------|------|-------------|
-| Baseline | 0.0 | — | — | 48.62 ± 0.03 |
-| Dropout | 0.3 | L3 | — | 48.55 ± 0.25 |
-| Dropout | 0.3 | L4 | — | 48.34 ± 0.06 |
-| SDrop | 0.1 | L3 | — | 48.60 ± 0.18 |
-| SDrop_Energy | 0.1 | L3 | — | 48.54 ± 0.21 |
-| SGridLC | 0.1 | L3 | 4 | 32.34 ± 27.58 ⚠️ |
-| **SGridLC** | **0.3** | **L3** | **4** | **48.66 ± 0.42** |
-
-**Best: SGridLC (Rate 0.3, L3, G=4) = 48.66% (+0.04%p over baseline)**
-
-> ⚠️ SGridLC (Rate 0.1, G=4, L3) shows severe instability (32.34 ± 27.58): fine-grained grids with low drop rates disrupt spatial continuity in early training.
-
----
-
-## Planned: CUB-200-2011 Experiment
-
-### Motivation
-
-CUB-200-2011 is the most direct validation of SDrop's core claim. Fine-grained bird classification requires distinguishing **subtle, rare visual features** (plumage patterns, beak shape, wing markings) against dominant background textures — precisely the failure mode SDrop is designed to fix.
-
-| Property | Why It Matters for SDrop |
-|----------|--------------------------|
-| 200 fine-grained classes | More inter-class feature overlap → dominant channels more harmful |
-| Subtle discriminative features | Rare feature preservation = the core SDrop hypothesis |
-| Background-heavy images | SGridLC's spatial separation should shine here |
-| 5,994 train / 5,794 test | Smaller training set → regularization effect is more critical |
-
-### Planned Setup
-
-| Config | Value |
-|--------|-------|
-| Dataset | CUB-200-2011 |
-| Resolution | 224×224 (standard crop) |
-| Backbone | ResNet-50 (pretrained ImageNet) |
-| SDrop insertion | L3, L4 |
-| Drop rates | 0.1, 0.3 |
-| Grid sizes (SGridLC) | G=2, G=4 |
-| Runs | 3 (mean ± std) |
-| Optimizer | SGD, lr=0.01 (fine-tune), momentum=0.9, wd=5×10⁻⁴ |
-
-### Expected Outcome
-
-Fine-grained datasets are where SDrop should demonstrate the **largest margin** over standard dropout, because:
-- Background channels (high energy, diffuse) will receive high EGPG scores → dropped
-- Fine-grained discriminative channels (low energy, spatially peaky) → preserved
-- SGridLC's grid decomposition should spatially isolate object vs. background suppression
-
-### TODO: Results Table (to be filled after experiments)
-
-| Method | Rate | Layer | Grid | Accuracy (%) |
-|--------|------|-------|------|-------------|
-| Baseline | 0.0 | — | — | TBD |
-| Dropout | 0.1 | L4 | — | TBD |
-| Dropout | 0.3 | L4 | — | TBD |
-| SDrop_Energy | 0.1 | L4 | — | TBD |
-| SDrop_Energy | 0.3 | L4 | — | TBD |
-| SGridLC | 0.1 | L3 | 2 | TBD |
-| SGridLC | 0.1 | L3 | 4 | TBD |
-| SGridLC | 0.3 | L3 | 4 | TBD |
-
----
-
-## Evaluation Metrics
-
-All evaluations use [`evaluate.py`](evaluate.py):
-
-| Metric | Description |
-|--------|-------------|
-| **Accuracy** | Top-1 accuracy (%) |
-| **F1-Macro** | Unweighted mean F1 across classes |
-| **F1-Micro** | Global F1 (total TP/FP/FN) |
-| **AUC** | ROC-AUC (OvR for multi-class) |
-| **ECE** | Expected Calibration Error (10 bins) |
-
----
-
-## Key Findings
-
-1. **SDrop_Energy outperforms standard dropout** on CIFAR-100: +0.77%p vs. baseline, +0.64%p vs. dropout at the same setting.
-2. **Standard dropout degrades at higher rates** (−0.24%p at Rate 0.3), whereas SDrop does not.
-3. **SGridLC achieves the best TinyImageNet result** while producing interpretable spatial suppression maps.
-4. **Score visualizations confirm the hypothesis**: warm (over-suppressive) regions concentrate on backgrounds; cool (low-suppression) regions on discriminative foreground objects.
-5. **Instability warning**: SGridLC with low drop rate + high grid resolution (G=4, Rate=0.1) can cause training collapse.
-
----
-
-## XAI Integration
-
-Every SDrop decision is fully interpretable:
-- **EGPG score maps**: heatmaps show which channels are over-suppressive
-- **Spatial drop masks**: SGridLC overlays reveal *where* regularization is most active
-- **LRP relevance**: before/after heatmaps show relevance redistribution toward rare-feature regions
-
-Unlike post-hoc methods (LIME, SHAP, GradCAM), SDrop **embeds** the explanation criterion directly into the training loop.
+Run ID format: `{dataset}_{method}_rate{drop_rate}_{layers}_seed{seed}`  
+Example: `cifar100_sdrop_energy_rate0.1_L4_seed0_best.pth`
 
 ---
 
@@ -192,7 +250,8 @@ Unlike post-hoc methods (LIME, SHAP, GradCAM), SDrop **embeds** the explanation 
 
 ```bibtex
 @article{lee2026sdrop,
-  title   = {Suppressive Dropout: An Explainable Channel-Selective Regularization Method for Preserving Rare Features},
+  title   = {Suppressive Dropout: An Explainable Channel-Selective
+             Regularization Method for Preserving Rare Features},
   author  = {Lee, Seunghyun},
   journal = {Neurocomputing},
   year    = {2026}
@@ -203,5 +262,4 @@ Unlike post-hoc methods (LIME, SHAP, GradCAM), SDrop **embeds** the explanation 
 
 ## Contact
 
-**Seunghyun Lee** — sh200411@korea.ac.kr  
-Korea University, Seoul, Republic of Korea
+Seunghyun Lee — sh200411@korea.ac.kr — Korea University
