@@ -1,8 +1,9 @@
 # Suppressive Dropout (SDrop)
 **An Explainable Channel-Selective Regularization Method for Preserving Rare Features**
 
-Seunghyun Lee — Korea University  
-*Submitted to Neurocomputing (Elsevier), 2026*
+Seunghyun Lee — Korea University
+
+Accepted at **XAI-2026** — *The 4th World Conference on eXplainable Artificial Intelligence* (Demo Track, Paper 8770), Fortaleza, Brazil, July 2026. Extended journal version under preparation for Neurocomputing (Elsevier).
 
 ---
 
