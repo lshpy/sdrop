@@ -37,8 +37,15 @@ def head_energy(A: torch.Tensor, gamma: float = 1.0, delta: float = 1.0) -> torc
     """
     E_h = 1 - (1 + gamma * mean_{i,j} A_{h,i,j}^2)^{-delta}
 
+    NOTE: For ViT we feed the *pre-softmax* attention logits into A here,
+    not the post-softmax probabilities. Post-softmax values are bounded
+    in [0,1] and produce vanishingly small mean-squared activations
+    (E_h ~ 0 for every head), which destroys the EGPG ranking signal.
+    Pre-softmax logits preserve the relative magnitude differences
+    between heads that the EGPG score is designed to exploit.
+
     Args:
-        A: (B, H, N, N) attention maps (after softmax)
+        A: (B, H, N, N) attention LOGITS (pre-softmax), or feature tensor
     Returns:
         (B, H) in (0, 1)
     """
@@ -48,10 +55,14 @@ def head_energy(A: torch.Tensor, gamma: float = 1.0, delta: float = 1.0) -> torc
 
 def head_peakedness(A: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
-    P_h = max_{i,j} A_{h,i,j} / (sum_{i,j} A_{h,i,j} + eps)
+    P_h = max_{i,j} |A_{h,i,j}| / (sum_{i,j} |A_{h,i,j}| + eps)
+
+    Using absolute values so the function is well-defined on pre-softmax
+    logits (which can be negative).
     """
-    peak = A.amax(dim=(2, 3))                     # (B, H)
-    total = A.sum(dim=(2, 3))                     # (B, H)
+    abs_A = A.abs()
+    peak = abs_A.amax(dim=(2, 3))                 # (B, H)
+    total = abs_A.sum(dim=(2, 3))                 # (B, H)
     return peak / (total + eps)
 
 
@@ -59,6 +70,8 @@ def head_egpg(A: torch.Tensor, gamma: float = 1.0, delta: float = 1.0,
               eps: float = 1e-6) -> torch.Tensor:
     """
     s_h = E_h * (1 - P_h)
+
+    A is expected to be the pre-softmax attention logits in our ViT setup.
     """
     E = head_energy(A, gamma, delta)
     P = head_peakedness(A, eps)
@@ -120,15 +133,17 @@ class SDropMultiheadSelfAttention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]            # each (B, H, N, head_dim)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, N, N)
-        attn = attn.softmax(dim=-1)
+        attn_logits = (q @ k.transpose(-2, -1)) * self.scale   # (B, H, N, N) pre-softmax
+        attn = attn_logits.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         # ---- SDrop head selection (training only) ----
         if self.training and self.sdrop_rate > 0.0:
             with torch.no_grad():
-                scores = head_egpg(attn, self.gamma, self.delta)   # (B, H)
-                mask = head_drop_mask(scores, self.sdrop_rate)      # (B, H)
+                # Score from pre-softmax logits — preserves head-magnitude
+                # differences that vanish after softmax.
+                scores = head_egpg(attn_logits, self.gamma, self.delta)   # (B, H)
+                mask = head_drop_mask(scores, self.sdrop_rate)             # (B, H)
                 self.last_scores = scores.detach()
                 self.last_mask = mask.detach()
             # apply per-head mask to value-attention output
@@ -280,7 +295,10 @@ class SDropViT(nn.Module):
 
 def build_sdrop_vit(num_classes: int = 100, img_size: int = 32,
                     method: str = "sdrop_vit", drop_rate: float = 0.1,
-                    layers=("L3", "L4"), gamma: float = 1.0, delta: float = 1.0):
+                    layers=("L3", "L4"), gamma: float = 100.0, delta: float = 1.0):
+    """gamma defaulted to 100 to amplify per-head differences in pre-softmax
+    attention logits, which are typically two orders of magnitude smaller
+    than CNN feature activations."""
     """
     Build a ViT-Tiny with SDrop applied to selected attention blocks.
 

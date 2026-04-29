@@ -54,18 +54,38 @@ def _pin_memory() -> bool:
 # Transforms
 # ---------------------------------------------------------------------------
 
-def cifar100_transforms():
-    train_tf = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408),
-                             (0.2675, 0.2565, 0.2761)),
-    ])
+def cifar100_transforms(strong: bool = False):
+    """
+    Return train/val transforms for CIFAR-100.
+
+    strong=True   : adds RandAugment + Random Erasing — recommended for
+                    ViT training-from-scratch (mitigates the heavy
+                    overfitting otherwise observed in ViT-Tiny on CIFAR).
+    strong=False  : the lightweight crop-and-flip pipeline used in the
+                    original ResNet experiments (kept identical for
+                    backward-compatible reproductions).
+    """
+    norm = transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                (0.2675, 0.2565, 0.2761))
+    if strong:
+        train_tf = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandAugment(num_ops=2, magnitude=9),
+            transforms.ToTensor(),
+            norm,
+            transforms.RandomErasing(p=0.25),
+        ])
+    else:
+        train_tf = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            norm,
+        ])
     val_tf = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408),
-                             (0.2675, 0.2565, 0.2761)),
+        norm,
     ])
     return train_tf, val_tf
 
@@ -114,8 +134,8 @@ def cub200_transforms():
 # ---------------------------------------------------------------------------
 
 def get_cifar100(data_root: str = './data', batch_size: int = 128,
-                 num_workers: int = 4):
-    train_tf, val_tf = cifar100_transforms()
+                 num_workers: int = 4, strong_aug: bool = False):
+    train_tf, val_tf = cifar100_transforms(strong=strong_aug)
     train_ds = datasets.CIFAR100(data_root, train=True,  download=True, transform=train_tf)
     val_ds   = datasets.CIFAR100(data_root, train=False, download=True, transform=val_tf)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -288,7 +308,7 @@ DATASET_CONFIG = {
 
 
 def get_dataset(name: str, data_root: str = './data', batch_size: int = 128,
-                num_workers: int = 4):
+                num_workers: int = 4, strong_aug: bool = False):
     """
     Returns (train_loader, val_loader, num_classes, default_arch, pretrained).
     """
@@ -296,6 +316,11 @@ def get_dataset(name: str, data_root: str = './data', batch_size: int = 128,
         raise ValueError(f"Unknown dataset '{name}'. "
                          f"Choose from: {list(DATASET_CONFIG.keys())}")
     cfg = DATASET_CONFIG[name]
-    train_loader, val_loader = cfg['getter'](data_root, batch_size, num_workers)
+    getter = cfg['getter']
+    if name == 'cifar100':
+        train_loader, val_loader = getter(data_root, batch_size, num_workers,
+                                          strong_aug=strong_aug)
+    else:
+        train_loader, val_loader = getter(data_root, batch_size, num_workers)
     return (train_loader, val_loader,
             cfg['num_classes'], cfg['arch'], cfg['pretrained'])

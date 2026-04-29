@@ -79,6 +79,15 @@ def parse_args():
     p.add_argument('--device',     type=str,   default='cuda')
     p.add_argument('--save_dir',   type=str,   default='./checkpoints')
     p.add_argument('--log_interval',type=int,  default=50)
+    # ViT-friendly training recipe extras
+    p.add_argument('--strong_aug', action='store_true',
+                   help='Use RandAugment + RandomErasing (recommended for ViT).')
+    p.add_argument('--mixup_alpha', type=float, default=0.0,
+                   help='Mixup alpha; 0 disables mixup.')
+    p.add_argument('--warmup_epochs', type=int, default=0,
+                   help='Linear LR warmup over this many epochs (ViT recommended).')
+    p.add_argument('--label_smoothing', type=float, default=0.0,
+                   help='Label smoothing (0.1 standard for ViT).')
 
     return p.parse_args()
 
@@ -108,7 +117,18 @@ def run_id(args) -> str:
 # Training / evaluation loops
 # ---------------------------------------------------------------------------
 
-def train_epoch(model, loader, criterion, optimizer, device, log_interval):
+def _mixup_batch(x, y, alpha: float, num_classes: int):
+    """Apply mixup with mixing coefficient lam ~ Beta(alpha, alpha)."""
+    if alpha <= 0:
+        return x, y, None
+    lam = float(torch.distributions.Beta(alpha, alpha).sample())
+    perm = torch.randperm(x.size(0), device=x.device)
+    x_mixed = lam * x + (1 - lam) * x[perm]
+    return x_mixed, y, (y[perm], lam)
+
+
+def train_epoch(model, loader, criterion, optimizer, device, log_interval,
+                mixup_alpha: float = 0.0, num_classes: int = 100):
     model.train()
     total_loss = 0.0
     correct = 0
@@ -117,8 +137,19 @@ def train_epoch(model, loader, criterion, optimizer, device, log_interval):
     for batch_idx, (data, target) in enumerate(loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
+
+        if mixup_alpha > 0:
+            data, target, mix_extra = _mixup_batch(data, target, mixup_alpha, num_classes)
+            output = model(data)
+            if mix_extra is None:
+                loss = criterion(output, target)
+            else:
+                target_b, lam = mix_extra
+                loss = lam * criterion(output, target) + (1 - lam) * criterion(output, target_b)
+        else:
+            output = model(data)
+            loss = criterion(output, target)
+
         loss.backward()
         optimizer.step()
 
@@ -157,7 +188,8 @@ def main():
 
     # ---- dataset ----
     train_loader, val_loader, num_classes, default_arch, default_pretrained = \
-        get_dataset(args.dataset, args.data_root, args.batch_size, args.num_workers)
+        get_dataset(args.dataset, args.data_root, args.batch_size, args.num_workers,
+                    strong_aug=args.strong_aug)
 
     arch       = args.arch       if args.arch       is not None else default_arch
     pretrained = args.pretrained if args.pretrained is not None else default_pretrained
@@ -191,7 +223,7 @@ def main():
     print(f"Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     # ---- optimizer + scheduler ----
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     if args.method.startswith("vit") or args.method.startswith("sdrop_vit"):
         # ViT works much better with AdamW + warmup
         optimizer = optim.AdamW(model.parameters(), lr=args.lr,
@@ -199,7 +231,17 @@ def main():
     else:
         optimizer = optim.SGD(model.parameters(), lr=args.lr,
                               momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    if args.warmup_epochs > 0:
+        warmup = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-2, end_factor=1.0,
+            total_iters=args.warmup_epochs)
+        cosine = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, args.epochs - args.warmup_epochs))
+        scheduler = optim.lr_scheduler.SequentialLR(
+            optimizer, [warmup, cosine], milestones=[args.warmup_epochs])
+    else:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # ---- checkpoint dir ----
     save_dir = Path(args.save_dir)
@@ -212,7 +254,8 @@ def main():
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device, args.log_interval)
+            model, train_loader, criterion, optimizer, device, args.log_interval,
+            mixup_alpha=args.mixup_alpha, num_classes=num_classes)
         scheduler.step()
 
         # evaluate every epoch
