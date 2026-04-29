@@ -162,15 +162,28 @@ def main():
     pretrained = args.pretrained if args.pretrained is not None else default_pretrained
 
     # ---- model ----
-    model = build_model(
-        arch=arch,
-        num_classes=num_classes,
-        method=args.method,
-        drop_rate=args.drop_rate,
-        layers=args.layers,
-        grid_size=args.grid_size,
-        pretrained=pretrained,
-    ).to(device)
+    if args.method.startswith("vit") or args.method.startswith("sdrop_vit"):
+        # ViT branch (head-level SDrop, see sdrop_vit.py)
+        from sdrop_vit import build_sdrop_vit
+        # CIFAR-100/TinyImageNet/CUB are all 3-channel; pick image size by dataset
+        img_size = {"cifar100": 32, "tinyimagenet": 64,
+                    "cub200": 224, "imagenet100": 224}.get(args.dataset, 32)
+        model = build_sdrop_vit(
+            num_classes=num_classes, img_size=img_size,
+            method=args.method, drop_rate=args.drop_rate,
+            layers=args.layers,
+        ).to(device)
+        arch = f"vit-tiny-p4-d12-h3"
+    else:
+        model = build_model(
+            arch=arch,
+            num_classes=num_classes,
+            method=args.method,
+            drop_rate=args.drop_rate,
+            layers=args.layers,
+            grid_size=args.grid_size,
+            pretrained=pretrained,
+        ).to(device)
 
     print(f"Model: {arch}  |  SDrop: {args.method}  |  "
           f"Rate: {args.drop_rate}  |  Layers: {args.layers}")
