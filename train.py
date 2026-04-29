@@ -58,7 +58,8 @@ def parse_args():
 
     # SDrop configuration
     p.add_argument('--method',     type=str, default='none',
-                   choices=['none', 'dropout', 'sdrop', 'sdrop_energy', 'sgridlc'])
+                   choices=['none', 'dropout', 'sdrop', 'sdrop_energy', 'sgridlc',
+                            'vit', 'sdrop_vit', 'sdrop_vit_full'])
     p.add_argument('--drop_rate',  type=float, default=0.1)
     p.add_argument('--layers',     type=str,   nargs='+', default=[],
                    choices=['L3', 'L4'],
@@ -191,8 +192,13 @@ def main():
 
     # ---- optimizer + scheduler ----
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=args.lr,
-                          momentum=args.momentum, weight_decay=args.weight_decay)
+    if args.method.startswith("vit") or args.method.startswith("sdrop_vit"):
+        # ViT works much better with AdamW + warmup
+        optimizer = optim.AdamW(model.parameters(), lr=args.lr,
+                                weight_decay=0.05, betas=(0.9, 0.999))
+    else:
+        optimizer = optim.SGD(model.parameters(), lr=args.lr,
+                              momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # ---- checkpoint dir ----
