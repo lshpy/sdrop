@@ -59,7 +59,8 @@ def parse_args():
     # SDrop configuration
     p.add_argument('--method',     type=str, default='none',
                    choices=['none', 'dropout', 'sdrop', 'sdrop_energy', 'sgridlc',
-                            'vit', 'sdrop_vit', 'sdrop_vit_full'])
+                            'vit', 'sdrop_vit', 'sdrop_vit_full',
+                            'dropblock', 'senet', 'cbam'])
     p.add_argument('--drop_rate',  type=float, default=0.1)
     p.add_argument('--layers',     type=str,   nargs='+', default=[],
                    choices=['L3', 'L4'],
