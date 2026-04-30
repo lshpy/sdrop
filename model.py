@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 from sdrop import build_sdrop
+from baselines import build_baseline
 
 
 class SDroResNet(nn.Module):
@@ -109,8 +110,13 @@ def build_model(arch: str, num_classes: int, method: str,
         # Baseline (no dropout)
         model = build_model('resnet18', 100, 'none', 0.0, [])
     """
-    sdrop_l3 = build_sdrop(method, drop_rate, grid_size) if 'L3' in layers else None
-    sdrop_l4 = build_sdrop(method, drop_rate, grid_size) if 'L4' in layers else None
+    if method in ('dropblock', 'senet', 'cbam'):
+        # comparison baselines from Springer ML extended version
+        sdrop_l3 = build_baseline(method, drop_rate) if 'L3' in layers else None
+        sdrop_l4 = build_baseline(method, drop_rate) if 'L4' in layers else None
+    else:
+        sdrop_l3 = build_sdrop(method, drop_rate, grid_size) if 'L3' in layers else None
+        sdrop_l4 = build_sdrop(method, drop_rate, grid_size) if 'L4' in layers else None
 
     return SDroResNet(
         arch=arch,
