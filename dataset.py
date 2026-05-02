@@ -134,39 +134,127 @@ def cub200_transforms():
 # ---------------------------------------------------------------------------
 
 def _ensure_cifar100(data_root: str):
-    """Robust CIFAR-100 fetch: try torchvision first, fall back to mirrors
-    if cs.toronto.edu returns 5xx (which it does intermittently)."""
+    """Robust CIFAR-100 fetch.
+
+    Strategy:
+      1. If cs.toronto.edu (the canonical host) is up, use it.
+      2. Otherwise download the HuggingFace `uoft-cs/cifar100` parquet
+         shards and convert them into torchvision's pickled format.
+    """
     import os, urllib.request, tarfile
     extracted = os.path.join(data_root, 'cifar-100-python')
     if os.path.isdir(extracted) and os.path.isfile(os.path.join(extracted, 'meta')):
         return
     os.makedirs(data_root, exist_ok=True)
+
+    # ---- attempt 1: original tar.gz mirror ----
     target = os.path.join(data_root, 'cifar-100-python.tar.gz')
-    mirrors = [
-        'https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz',
-        'https://huggingface.co/datasets/clane9/cifar-100-python/resolve/main/cifar-100-python.tar.gz',
-    ]
-    last_err = None
-    for url in mirrors:
+    try:
+        print('  CIFAR-100: trying cs.toronto.edu tar.gz')
+        urllib.request.urlretrieve(
+            'https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz', target)
+        with tarfile.open(target) as t:
+            t.extractall(data_root)
+        print('  CIFAR-100 ready at', extracted)
+        return
+    except Exception as e:
+        print('  toronto mirror failed:', e)
+
+    # ---- attempt 2: HuggingFace parquet → repickle into torchvision format ----
+    try:
+        print('  CIFAR-100: falling back to HuggingFace parquet mirror')
+        import io, pickle, numpy as np
+        from PIL import Image
         try:
-            print(f'  CIFAR-100 download: trying {url[:60]}...')
-            urllib.request.urlretrieve(url, target)
-            with tarfile.open(target) as t:
-                t.extractall(data_root)
-            print('  CIFAR-100 ready at', extracted)
-            return
-        except Exception as e:
-            print('  failed:', e)
-            last_err = e
-    raise RuntimeError(f'all CIFAR-100 mirrors failed; last error: {last_err}')
+            import pyarrow.parquet as pq
+        except ImportError:
+            import subprocess, sys
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'pyarrow'])
+            import pyarrow.parquet as pq
+
+        os.makedirs(extracted, exist_ok=True)
+        meta = {
+            'fine_label_names': [s.encode() for s in [
+                'apple','aquarium_fish','baby','bear','beaver','bed','bee','beetle','bicycle','bottle',
+                'bowl','boy','bridge','bus','butterfly','camel','can','castle','caterpillar','cattle',
+                'chair','chimpanzee','clock','cloud','cockroach','couch','crab','crocodile','cup','dinosaur',
+                'dolphin','elephant','flatfish','forest','fox','girl','hamster','house','kangaroo','keyboard',
+                'lamp','lawn_mower','leopard','lion','lizard','lobster','man','maple_tree','motorcycle','mountain',
+                'mouse','mushroom','oak_tree','orange','orchid','otter','palm_tree','pear','pickup_truck','pine_tree',
+                'plain','plate','poppy','porcupine','possum','rabbit','raccoon','ray','road','rocket',
+                'rose','sea','seal','shark','shrew','skunk','skyscraper','snail','snake','spider',
+                'squirrel','streetcar','sunflower','sweet_pepper','table','tank','telephone','television','tiger','tractor',
+                'train','trout','tulip','turtle','wardrobe','whale','willow_tree','wolf','woman','worm']],
+            'coarse_label_names': [s.encode() for s in [
+                'aquatic_mammals','fish','flowers','food_containers','fruit_and_vegetables','household_electrical_devices',
+                'household_furniture','insects','large_carnivores','large_man-made_outdoor_things',
+                'large_natural_outdoor_scenes','large_omnivores_and_herbivores','medium_mammals','non-insect_invertebrates',
+                'people','reptiles','small_mammals','trees','vehicles_1','vehicles_2']],
+        }
+        with open(os.path.join(extracted, 'meta'), 'wb') as f:
+            pickle.dump(meta, f)
+
+        for split, url, out_name in [
+            ('train', 'https://huggingface.co/datasets/uoft-cs/cifar100/resolve/main/cifar100/train-00000-of-00001.parquet', 'train'),
+            ('test',  'https://huggingface.co/datasets/uoft-cs/cifar100/resolve/main/cifar100/test-00000-of-00001.parquet',  'test'),
+        ]:
+            print(f'  fetching HF {split} parquet')
+            tmp = os.path.join(data_root, f'{split}.parquet')
+            urllib.request.urlretrieve(url, tmp)
+            tbl = pq.read_table(tmp).to_pandas()
+            data = np.empty((len(tbl), 3 * 32 * 32), dtype=np.uint8)
+            fine = []
+            coarse = []
+            filenames = []
+            for i, row in tbl.iterrows():
+                img_bytes = row['img']['bytes']
+                img = np.array(Image.open(io.BytesIO(img_bytes)).convert('RGB'))   # (32,32,3) HWC
+                data[i] = img.transpose(2, 0, 1).reshape(-1)                       # CHW flat as torchvision expects
+                fine.append(int(row['fine_label']))
+                coarse.append(int(row['coarse_label']))
+                filenames.append(f'{split}_{i:05d}'.encode())
+            obj = {
+                'data': data,
+                'fine_labels': fine,
+                'coarse_labels': coarse,
+                'filenames': filenames,
+                'batch_label': split.encode(),
+            }
+            with open(os.path.join(extracted, out_name), 'wb') as f:
+                pickle.dump(obj, f)
+            os.remove(tmp)
+        print('  CIFAR-100 (from HF) ready at', extracted)
+        return
+    except Exception as e:
+        raise RuntimeError(f'all CIFAR-100 mirrors failed; last error: {e}')
+
+
+class _CIFAR100NoIntegrityCheck(datasets.CIFAR100):
+    """torchvision CIFAR100 with integrity checks disabled — needed when the
+    files come from a non-canonical mirror (HF parquet) whose MD5 differs."""
+    def _check_integrity(self) -> bool:
+        import os
+        # accept the dataset as long as the pickled split files exist
+        for name, _ in (self.train_list + self.test_list):
+            if not os.path.isfile(os.path.join(self.root, self.base_folder, name)):
+                return False
+        return True
+
+    def _load_meta(self) -> None:
+        import os, pickle
+        path = os.path.join(self.root, self.base_folder, self.meta["filename"])
+        with open(path, "rb") as f:
+            data = pickle.load(f, encoding="latin1")
+        self.classes = data[self.meta["key"]]
+        self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
 
 
 def get_cifar100(data_root: str = './data', batch_size: int = 128,
                  num_workers: int = 4, strong_aug: bool = False):
     train_tf, val_tf = cifar100_transforms(strong=strong_aug)
     _ensure_cifar100(data_root)
-    train_ds = datasets.CIFAR100(data_root, train=True,  download=False, transform=train_tf)
-    val_ds   = datasets.CIFAR100(data_root, train=False, download=False, transform=val_tf)
+    train_ds = _CIFAR100NoIntegrityCheck(data_root, train=True,  download=False, transform=train_tf)
+    val_ds   = _CIFAR100NoIntegrityCheck(data_root, train=False, download=False, transform=val_tf)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=_pin_memory())
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
