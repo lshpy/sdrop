@@ -133,11 +133,40 @@ def cub200_transforms():
 # CIFAR-100
 # ---------------------------------------------------------------------------
 
+def _ensure_cifar100(data_root: str):
+    """Robust CIFAR-100 fetch: try torchvision first, fall back to mirrors
+    if cs.toronto.edu returns 5xx (which it does intermittently)."""
+    import os, urllib.request, tarfile
+    extracted = os.path.join(data_root, 'cifar-100-python')
+    if os.path.isdir(extracted) and os.path.isfile(os.path.join(extracted, 'meta')):
+        return
+    os.makedirs(data_root, exist_ok=True)
+    target = os.path.join(data_root, 'cifar-100-python.tar.gz')
+    mirrors = [
+        'https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz',
+        'https://huggingface.co/datasets/clane9/cifar-100-python/resolve/main/cifar-100-python.tar.gz',
+    ]
+    last_err = None
+    for url in mirrors:
+        try:
+            print(f'  CIFAR-100 download: trying {url[:60]}...')
+            urllib.request.urlretrieve(url, target)
+            with tarfile.open(target) as t:
+                t.extractall(data_root)
+            print('  CIFAR-100 ready at', extracted)
+            return
+        except Exception as e:
+            print('  failed:', e)
+            last_err = e
+    raise RuntimeError(f'all CIFAR-100 mirrors failed; last error: {last_err}')
+
+
 def get_cifar100(data_root: str = './data', batch_size: int = 128,
                  num_workers: int = 4, strong_aug: bool = False):
     train_tf, val_tf = cifar100_transforms(strong=strong_aug)
-    train_ds = datasets.CIFAR100(data_root, train=True,  download=True, transform=train_tf)
-    val_ds   = datasets.CIFAR100(data_root, train=False, download=True, transform=val_tf)
+    _ensure_cifar100(data_root)
+    train_ds = datasets.CIFAR100(data_root, train=True,  download=False, transform=train_tf)
+    val_ds   = datasets.CIFAR100(data_root, train=False, download=False, transform=val_tf)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=_pin_memory())
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
