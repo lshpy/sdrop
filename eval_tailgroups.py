@@ -112,7 +112,14 @@ def main():
     print(f"{'run':<52}{'Many':>7}{'Medium':>8}{'Few':>7}{'All':>7}")
     print('-' * 81)
 
+    skipped = []
     for path in paths:
+        # history.csv 는 학습이 끝나야 쓰인다. 없으면 진행 중인 런이고, 그 시점의
+        # _best.pth 를 평가하면 완료된 런과 나란히 놓기에 부적절하다.
+        if not os.path.isfile(path.replace('_best.pth', '_history.csv')):
+            skipped.append(os.path.basename(path).replace('_best.pth', ''))
+            continue
+
         ckpt = torch.load(path, map_location='cpu', weights_only=False)
         a = ckpt['args']
         if a.get('dataset') not in ('cifar100', 'cifar100_lt'):
@@ -149,6 +156,9 @@ def main():
             w.writeheader()
             w.writerows(rows)
         print(f'\n저장: {args.csv}')
+
+    if skipped:
+        print('\n진행 중이라 제외 (history.csv 없음): ' + ', '.join(skipped))
 
     if rows:
         n_few = sum(1 for g in class_groups(100.0, n_cls)[1] if g == 'Few')

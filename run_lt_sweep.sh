@@ -39,8 +39,24 @@ for p in 0.2 0.3 0.5; do
       $LT --method sdrop_energy --drop_rate $p --layers L4
 done
 
-# mean 정규화: 실효 = 명목. 0.1 은 run_queue.sh 가 이미 돌리므로 그 위쪽만.
-for p in 0.05 0.2; do
+# mean 정규화: 실효 = 명목이지만, 그게 곧 공정한 비교는 아니다.
+#
+# max 정규화의 실측 p̄ = 0.0169 에서 점수 분포의 max/mean = 5.9 가 역산된다.
+# mean 정규화는 p_drop,c = drop_rate * s_c/mean(s) 이므로 최고점수 채널의
+# 드롭 확률이 drop_rate * 5.9 가 된다:
+#
+#     drop_rate 0.02 -> 0.12      0.05 -> 0.30
+#     drop_rate 0.03 -> 0.18      0.10 -> 0.59   <- run_queue.sh 가 돌린 조건
+#
+# 즉 nmmean 0.1 은 최고 채널을 매 3회 중 2회 가까이 지운다. 논문 §negative_case
+# 가 "p_base 가 0.5 에 가까워지면 해당 채널은 학습에 필요한 그래디언트를 아예
+# 못 받는다"고 서술한 바로 그 영역이다. 평균을 맞췄다고 개입의 *모양*까지 맞춘
+# 것은 아니다 — 같은 평균을 소수 채널에 몰아준 것이다.
+#
+# 따라서 최고 채널이 안전 영역(0.1~0.2)에 오도록 낮은 쪽을 훑는다. 이때도
+# p̄ 는 max 정규화의 0.017 보다 높으므로 "더 세게 개입하면서 tail 을 지키는가"
+# 라는 질문에 답이 된다.
+for p in 0.02 0.03 0.05; do
   run "cifar100_lt_sdrop_energy_rate${p}_L4_imb100_nmmean_seed0" \
       $LT --method sdrop_energy --drop_rate $p --layers L4 --norm mean
 done
