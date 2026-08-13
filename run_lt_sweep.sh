@@ -33,6 +33,25 @@ run () {
 
 LT="--dataset cifar100_lt --imb_ratio 100 --epochs 200 --seed 0"
 
+# ── 가장 중요한 대조군: 실효 드롭률을 맞춘 무작위 선택 ──────────────
+#
+# "어느 채널을 고르는가"가 정말 중요한지 가리는 유일한 방법은, 같은 양을
+# 무작위로 지운 것과 비교하는 것이다. 지금 표의 SpatialDropout 은 p=0.100
+# 인데 SDrop_Energy 는 p̄=0.017 이라 강도가 6배 다르다.
+#
+# 앞서 mean 정규화로 SDrop 을 0.100 까지 "올려" 맞추려 했으나, 그러면 최고
+# 채널이 0.59 확률로 드롭되어 파괴적 영역에 들어간다. 반대로 하면 된다 —
+# SpatialDropout 을 SDrop 의 0.017 까지 "내려서" 맞춘다. 이쪽은 어떤 채널도
+# 파괴적 영역에 들어가지 않는다.
+#
+#   같은 이득  -> 선택 기준은 무의미. 이득의 정체는 약한 정규화
+#   SDrop 우위 -> EGPG 점수가 실제로 옳은 채널을 고르고 있다
+#
+# sdrop_random(s_c=1) 은 max 정규화에서 모든 채널이 동일 확률이 되므로
+# SpatialDropout 과 같은 것이 되어 따로 돌릴 필요가 없다.
+run "cifar100_lt_dropout_rate0.017_L4_imb100_seed0" \
+    $LT --method dropout --drop_rate 0.017 --layers L4
+
 # max 정규화: 명목값을 올려 실효 드롭률을 끌어올린다
 for p in 0.2 0.3 0.5; do
   run "cifar100_lt_sdrop_energy_rate${p}_L4_imb100_seed0" \
