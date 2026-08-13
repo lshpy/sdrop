@@ -82,6 +82,10 @@ def parse_args():
                    choices=['max', 'mean', 'rank'],
                    help="drop-probability normalisation: 'max' (paper), 'mean', "
                         "or 'rank' (effective rate equals nominal for any beta)")
+    p.add_argument('--mix',        type=float, default=None,
+                   help="combine the EGPG factors by rank instead of multiplying: "
+                        "s_c = (1-mix)*rank(E_c) + mix*rank(1-P_c). 0 is energy-only, "
+                        "1 peakedness-only. Unset keeps the product")
     p.add_argument('--beta',       type=float, default=1.0,
                    help="selection strength for --norm rank. 0 reproduces uniform "
                         "channel dropout; higher concentrates drops on top-scoring "
@@ -146,6 +150,7 @@ def run_id(args) -> str:
     if args.peakedness != 'max': extra += f'_pk{args.peakedness}'
     if args.norm       != 'max': extra += f'_nm{args.norm}'
     if args.norm == 'rank':      extra += f'_b{args.beta:g}'
+    if args.mix is not None:     extra += f'_mix{args.mix:g}'
     if args.self_gamma:          extra += '_sg'
     return (f"{args.dataset}_{args.method}_rate{args.drop_rate}"
             f"_{layers_str}{grid_str}{extra}_seed{args.seed}")
@@ -275,6 +280,7 @@ def main():
             peakedness=args.peakedness,
             norm=args.norm,
             beta=args.beta,
+            mix=args.mix,
             gamma=(None if args.self_gamma else 1.0),
             grad_mode=args.grad_mode,
             pretrained=pretrained,

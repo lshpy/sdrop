@@ -88,6 +88,7 @@ class SDroResNet(nn.Module):
 def build_model(arch: str, num_classes: int, method: str,
                 drop_rate: float, layers: list, grid_size: int = 2,
                 peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
+                mix: float = None,
                 gamma: float = 1.0, grad_mode: str = 'off',
                 pretrained: bool = False) -> SDroResNet:
     """
@@ -124,6 +125,7 @@ def build_model(arch: str, num_classes: int, method: str,
     else:
         sdrop_l3 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
                                peakedness=peakedness, norm=norm, beta=beta,
+                               mix=mix,
                                grad_mode=grad_mode) if 'L3' in layers else None
         sdrop_l4 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
                                peakedness=peakedness, norm=norm,

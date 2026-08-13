@@ -115,9 +115,17 @@ def _peakedness(x: torch.Tensor, kind: str = 'max', eps: float = 1e-6) -> torch.
     raise ValueError(f"Unknown peakedness kind: '{kind}'. Choose 'max' or 'entropy'.")
 
 
+def _unit_rank(v: torch.Tensor) -> torch.Tensor:
+    """(B, C) -> 채널 순위를 [0, 1] 로 정규화. 값의 척도를 지우고 순서만 남긴다."""
+    C = v.shape[1]
+    if C < 2:
+        return torch.zeros_like(v)
+    return v.argsort(dim=1).argsort(dim=1).to(v.dtype) / (C - 1)
+
+
 def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
                   delta: float = 1.0, peakedness: str = 'max',
-                  eps: float = 1e-6) -> torch.Tensor:
+                  eps: float = 1e-6, mix: float = None) -> torch.Tensor:
     """
     Unified score front-end. Returns (B, C).
 
@@ -125,6 +133,24 @@ def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
       'energy'  : s_c = E_c                 energy only
       'peak'    : s_c = (1 - P_c)           peakedness only   [ablation]
       'random'  : s_c = 1                   uniform            [ablation control]
+
+    mix (egpg only) replaces the product with a weighted sum of the two factors'
+    channel ranks:
+
+        s_c = (1 - mix) * rank(E_c) + mix * rank(1 - P_c)
+
+    The product weights whichever factor happens to vary more. Measured on a
+    trained CIFAR-100-LT model at L4, energy carries 91% of the log-variance of
+    s_c under the 'max' peakedness, and the Spearman correlation between the
+    EGPG score and energy alone is 0.998 -- the peakedness half barely moves the
+    ordering, which is why SDrop and SDropEnergy score alike. Switching to
+    'entropy' peakedness rebalances this to 46/54, but by accident of the two
+    distributions rather than by design, and the balance shifts with layer,
+    dataset and training stage.
+
+    Ranking each factor first makes both uniform on [0, 1], so mix sets the
+    balance explicitly: 0 recovers energy-only, 1 recovers peakedness-only, and
+    the intermediate values are a continuum the original product cannot express.
     """
     if score == 'random':
         return torch.ones(x.shape[0], x.shape[1], device=x.device, dtype=x.dtype)
@@ -134,8 +160,10 @@ def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
         return 1.0 - _peakedness(x, peakedness, eps)
     if score == 'egpg':
         E = channel_energy(x, gamma, delta, eps)
-        P = _peakedness(x, peakedness, eps)
-        return E * (1.0 - P)
+        D = 1.0 - _peakedness(x, peakedness, eps)
+        if mix is None:
+            return E * D
+        return (1.0 - mix) * _unit_rank(E) + mix * _unit_rank(D)
     raise ValueError(f"Unknown score: '{score}'. "
                      "Choose from: egpg, energy, peak, random")
 
@@ -262,6 +290,7 @@ class SDrop(nn.Module, DropRateMonitor):
     def __init__(self, drop_rate: float = 0.1, score: str = 'egpg',
                  gamma: float = 1.0, delta: float = 1.0,
                  peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
+                 mix: float = None,
                  grad_mode: str = 'off', grad_ema: float = 0.9,
                  eps: float = 1e-6):
         super().__init__()
@@ -272,6 +301,7 @@ class SDrop(nn.Module, DropRateMonitor):
         self.peakedness = peakedness
         self.norm = norm
         self.beta = beta
+        self.mix = mix
         self.grad_mode = grad_mode
         self.grad_ema = grad_ema
         self.eps = eps
@@ -305,7 +335,7 @@ class SDrop(nn.Module, DropRateMonitor):
         if not self.training or self.drop_rate <= 0.0:
             return x
         scores = compute_score(x, self.score, self.gamma, self.delta,
-                               self.peakedness, self.eps)          # (B, C)
+                               self.peakedness, self.eps, self.mix)   # (B, C)
         if self.grad_mode != 'off':
             scores = self._apply_grad_guidance(scores)
             if x.requires_grad:
@@ -362,7 +392,7 @@ class SGridLC(nn.Module, DropRateMonitor):
     def __init__(self, drop_rate: float = 0.1, grid_size: int = 2,
                  score: str = 'egpg', gamma: float = 1.0, delta: float = 1.0,
                  peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
-                 eps: float = 1e-6):
+                 mix: float = None, eps: float = 1e-6):
         super().__init__()
         self.drop_rate = drop_rate
         self.grid_size = grid_size
@@ -372,6 +402,7 @@ class SGridLC(nn.Module, DropRateMonitor):
         self.peakedness = peakedness
         self.norm = norm
         self.beta = beta
+        self.mix = mix
         self.eps = eps
         self._init_monitor()
 
@@ -400,7 +431,7 @@ class SGridLC(nn.Module, DropRateMonitor):
                 cell = x[:, :, h0:h1, w0:w1]              # (B, C, ch, cw)
 
                 scores = compute_score(cell, self.score, self.gamma, self.delta,
-                                       self.peakedness, self.eps)
+                                       self.peakedness, self.eps, self.mix)
                 cell_mask = drop_mask_from_scores(scores, self.drop_rate,
                                                   self.norm, self.eps, self.beta)
                 mask[:, :, h0:h1, w0:w1] = cell_mask
@@ -433,7 +464,7 @@ _SCORE_OF_METHOD = {
 def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
                 gamma: float = 1.0, delta: float = 1.0,
                 peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
-                grad_mode: str = 'off') -> nn.Module:
+                mix: float = None, grad_mode: str = 'off') -> nn.Module:
     """
     method: 'none' | 'dropout' | 'sdrop' | 'sdrop_energy'
           | 'sdrop_peak' | 'sdrop_random' | 'sgridlc'
@@ -452,11 +483,11 @@ def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
         return nn.Dropout(p=drop_rate)
     if method in _SCORE_OF_METHOD:
         return SDrop(drop_rate, score=_SCORE_OF_METHOD[method], gamma=gamma,
-                     delta=delta, peakedness=peakedness, norm=norm, beta=beta,
+                     delta=delta, peakedness=peakedness, norm=norm, beta=beta, mix=mix,
                      grad_mode=grad_mode)
     if method == 'sgridlc':
         return SGridLC(drop_rate, grid_size, score='egpg', gamma=gamma,
-                       delta=delta, peakedness=peakedness, norm=norm, beta=beta)
+                       delta=delta, peakedness=peakedness, norm=norm, beta=beta, mix=mix)
     raise ValueError(f"Unknown SDrop method: '{method}'. Choose from: none, dropout "
                      "(=SpatialDropout), dropout_std, spatialdropout, sdrop, "
                      "sdrop_energy, sdrop_peak, sdrop_random, sgridlc")
