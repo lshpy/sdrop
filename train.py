@@ -34,6 +34,7 @@ import torch.optim as optim
 
 from dataset import get_dataset
 from model import build_model
+from sdrop import collect_drop_rates
 from evaluate import evaluate
 
 
@@ -58,15 +59,22 @@ def parse_args():
 
     # SDrop configuration
     p.add_argument('--method',     type=str, default='none',
-                   choices=['none', 'dropout', 'sdrop', 'sdrop_energy', 'sgridlc',
-                            'vit', 'sdrop_vit', 'sdrop_vit_full',
-                            'dropblock', 'senet', 'cbam'])
+                   choices=['none', 'dropout', 'dropout_std', 'spatialdropout',
+                            'sdrop', 'sdrop_energy', 'sdrop_peak', 'sdrop_random',
+                            'sgridlc', 'dropblock', 'senet', 'cbam',
+                            'vit', 'sdrop_vit', 'sdrop_vit_full'])
     p.add_argument('--drop_rate',  type=float, default=0.1)
     p.add_argument('--layers',     type=str,   nargs='+', default=[],
                    choices=['L3', 'L4'],
                    help='Layers to insert SDrop: e.g. --layers L3 L4')
     p.add_argument('--grid_size',  type=int,   default=2,
                    help='G for SGridLC (grid cells per side)')
+    p.add_argument('--peakedness', type=str, default='max', choices=['max', 'entropy'],
+                   help="P_c definition: 'max' (paper) or 'entropy' (resolution-invariant)")
+    p.add_argument('--norm',       type=str, default='max', choices=['max', 'mean'],
+                   help="drop-probability normalisation: 'max' (paper) or 'mean'")
+    p.add_argument('--self_gamma', action='store_true',
+                   help='use self-normalising gamma = 1/median(Sigma_c)')
 
     # Training hyperparameters
     p.add_argument('--epochs',     type=int,   default=200)
@@ -216,6 +224,9 @@ def main():
             drop_rate=args.drop_rate,
             layers=args.layers,
             grid_size=args.grid_size,
+            peakedness=args.peakedness,
+            norm=args.norm,
+            gamma=(None if args.self_gamma else 1.0),
             pretrained=pretrained,
         ).to(device)
 
@@ -263,6 +274,11 @@ def main():
         metrics = evaluate(model, val_loader, device=str(device))
         val_acc = metrics['acc']
 
+        # realised (effective) drop fraction — p_base is only an upper bound
+        # under 'max' normalisation, so we log what actually happened.
+        drop_rates = collect_drop_rates(model)
+        eff_drop = (sum(drop_rates.values()) / len(drop_rates)) if drop_rates else float('nan')
+
         elapsed = time.time() - t0
         print(f"Epoch {epoch:3d}/{args.epochs}  "
               f"train_loss={train_loss:.4f}  train_acc={train_acc:.2f}%  "
@@ -270,10 +286,12 @@ def main():
               f"f1_mac={metrics['f1_macro']:.4f}  "
               f"auc={metrics['auc']:.4f}  "
               f"ece={metrics['ece']:.4f}  "
-              f"({elapsed:.1f}s)")
+              + (f"p_eff={eff_drop:.4f}  " if eff_drop == eff_drop else "")
+              + f"({elapsed:.1f}s)")
 
         history.append({'epoch': epoch, **metrics,
-                        'train_loss': train_loss, 'train_acc': train_acc})
+                        'train_loss': train_loss, 'train_acc': train_acc,
+                        'p_eff': eff_drop})
 
         if val_acc > best_acc:
             best_acc = val_acc
