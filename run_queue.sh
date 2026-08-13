@@ -17,6 +17,11 @@ mkdir -p "$CKPT" logs
 AMP_FLAG=""
 [ "${AMP:-1}" = "1" ] && AMP_FLAG="--amp"
 
+# Windows에서는 DataLoader 워커가 매 에폭 spawn되며 데이터셋 전체를 각 프로세스로
+# 직렬화한다. 측정 결과 에폭당 42초가 그 오버헤드였고, 단일 스레드 로딩은 3초에
+# 불과하다. 리눅스 GPU 서버에서는 NW=4 로 되돌릴 것.
+NW_FLAG="--num_workers ${NW:-0}"
+
 run () {  # run <run_id> <train.py 인자...>
   local id="$1"; shift
   if [ -f "$CKPT/${id}_history.csv" ]; then
@@ -25,7 +30,7 @@ run () {  # run <run_id> <train.py 인자...>
   fi
   echo "──────────────────────────────────────────────────────────"
   echo "[실행] $id      $(date '+%F %T')"
-  python train.py "$@" $AMP_FLAG 2>&1 | tee "logs/${id}.log"
+  python train.py "$@" $AMP_FLAG $NW_FLAG 2>&1 | tee "logs/${id}.log"
   echo "[완료] $id      $(date '+%F %T')"
 }
 
