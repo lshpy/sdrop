@@ -39,8 +39,9 @@ import os
 from pathlib import Path
 import shutil
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 from PIL import Image
 
@@ -263,6 +264,95 @@ def get_cifar100(data_root: str = './data', batch_size: int = 128,
 
 
 # ---------------------------------------------------------------------------
+# CIFAR-100-LT  (long-tailed) and label-noise / subset variants
+# ---------------------------------------------------------------------------
+
+def _exp_profile(n_classes: int, n_max: int, imb_ratio: float):
+    """
+    Exponential imbalance profile used by the long-tailed literature
+    (Cui et al. 2019, Cao et al. 2019):
+
+        n_k = n_max * (1/imb_ratio)^{k/(K-1)},   k = 0 .. K-1
+
+    so class 0 keeps all n_max samples and class K-1 keeps n_max/imb_ratio.
+    """
+    return [int(round(n_max * (1.0 / imb_ratio) ** (k / (n_classes - 1))))
+            for k in range(n_classes)]
+
+
+def make_longtail_indices(targets, n_classes: int, imb_ratio: float, seed: int = 0):
+    """Return indices of a class-imbalanced subset with an exponential profile."""
+    rng = np.random.RandomState(seed)
+    targets = np.asarray(targets)
+    n_max = int(np.bincount(targets, minlength=n_classes).max())
+    counts = _exp_profile(n_classes, n_max, imb_ratio)
+    idx = []
+    for k, n_k in enumerate(counts):
+        cls_idx = np.where(targets == k)[0]
+        rng.shuffle(cls_idx)
+        idx.extend(cls_idx[:n_k].tolist())
+    rng.shuffle(idx)
+    return idx, counts
+
+
+def corrupt_labels(targets, n_classes: int, noise_rate: float, seed: int = 0):
+    """Symmetric label noise: with prob. noise_rate replace the label uniformly."""
+    rng = np.random.RandomState(seed)
+    targets = np.array(targets, copy=True)
+    n_flip = int(round(noise_rate * len(targets)))
+    flip_idx = rng.choice(len(targets), size=n_flip, replace=False)
+    targets[flip_idx] = rng.randint(0, n_classes, size=n_flip)
+    return targets.tolist()
+
+
+def get_cifar100_lt(data_root: str = './data', batch_size: int = 128,
+                    num_workers: int = 4, strong_aug: bool = False,
+                    imb_ratio: float = 100.0, subset_frac: float = 1.0,
+                    label_noise: float = 0.0, seed: int = 0):
+    """
+    CIFAR-100 with optional long-tail imbalance, random subsetting and
+    symmetric label noise. The *validation* set is always left untouched and
+    balanced, which is the standard protocol for long-tailed benchmarks.
+
+    imb_ratio    : n_max / n_min  (100 -> head 500 imgs, tail 5 imgs).
+                   1.0 disables imbalance.
+    subset_frac  : keep this fraction of the (already imbalanced) train set.
+    label_noise  : symmetric label-noise rate applied to the train split.
+    """
+    train_tf, val_tf = cifar100_transforms(strong=strong_aug)
+    _ensure_cifar100(data_root)
+    train_ds = _CIFAR100NoIntegrityCheck(data_root, train=True,  download=False, transform=train_tf)
+    val_ds   = _CIFAR100NoIntegrityCheck(data_root, train=False, download=False, transform=val_tf)
+
+    if label_noise > 0.0:
+        train_ds.targets = corrupt_labels(train_ds.targets, 100, label_noise, seed)
+
+    if imb_ratio and imb_ratio > 1.0:
+        idx, counts = make_longtail_indices(train_ds.targets, 100, imb_ratio, seed)
+        print(f"[CIFAR-100-LT] imb_ratio={imb_ratio:g}  "
+              f"head={counts[0]}  tail={counts[-1]}  total={len(idx)}")
+    else:
+        idx = list(range(len(train_ds)))
+
+    if subset_frac < 1.0:
+        rng = np.random.RandomState(seed + 1)
+        keep = int(round(len(idx) * subset_frac))
+        idx = rng.permutation(idx)[:keep].tolist()
+        print(f"[subset] keeping {keep} training images ({subset_frac:.0%})")
+
+    if label_noise > 0.0:
+        print(f"[label noise] symmetric rate = {label_noise:.0%}")
+
+    train_subset = Subset(train_ds, idx)
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=_pin_memory(),
+                              drop_last=False)
+    val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, pin_memory=_pin_memory())
+    return train_loader, val_loader
+
+
+# ---------------------------------------------------------------------------
 # TinyImageNet
 # ---------------------------------------------------------------------------
 
@@ -409,6 +499,12 @@ DATASET_CONFIG = {
         'pretrained':  False,
         'getter':      get_cifar100,
     },
+    'cifar100_lt': {
+        'num_classes': 100,
+        'arch':        'resnet18',
+        'pretrained':  False,
+        'getter':      get_cifar100_lt,
+    },
     'tinyimagenet': {
         'num_classes': 200,
         'arch':        'resnet50',
@@ -425,16 +521,27 @@ DATASET_CONFIG = {
 
 
 def get_dataset(name: str, data_root: str = './data', batch_size: int = 128,
-                num_workers: int = 4, strong_aug: bool = False):
+                num_workers: int = 4, strong_aug: bool = False,
+                imb_ratio: float = 1.0, subset_frac: float = 1.0,
+                label_noise: float = 0.0, seed: int = 0):
     """
     Returns (train_loader, val_loader, num_classes, default_arch, pretrained).
+
+    imb_ratio / subset_frac / label_noise apply to 'cifar100' and 'cifar100_lt'
+    and are ignored elsewhere.
     """
     if name not in DATASET_CONFIG:
         raise ValueError(f"Unknown dataset '{name}'. "
                          f"Choose from: {list(DATASET_CONFIG.keys())}")
     cfg = DATASET_CONFIG[name]
     getter = cfg['getter']
-    if name == 'cifar100':
+    if name == 'cifar100_lt' or (name == 'cifar100' and
+                                 (imb_ratio > 1.0 or subset_frac < 1.0 or label_noise > 0.0)):
+        train_loader, val_loader = get_cifar100_lt(
+            data_root, batch_size, num_workers, strong_aug=strong_aug,
+            imb_ratio=imb_ratio, subset_frac=subset_frac,
+            label_noise=label_noise, seed=seed)
+    elif name == 'cifar100':
         train_loader, val_loader = getter(data_root, batch_size, num_workers,
                                           strong_aug=strong_aug)
     else:

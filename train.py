@@ -47,7 +47,14 @@ def parse_args():
 
     # Dataset
     p.add_argument('--dataset',    type=str, default='cifar100',
-                   choices=['cifar100', 'tinyimagenet', 'cub200'])
+                   choices=['cifar100', 'cifar100_lt', 'tinyimagenet', 'cub200'])
+    p.add_argument('--imb_ratio',  type=float, default=1.0,
+                   help='long-tail imbalance n_max/n_min (100 -> head 500, tail 5); '
+                        '1.0 disables imbalance')
+    p.add_argument('--subset_frac', type=float, default=1.0,
+                   help='keep this fraction of the training set (low-data regime)')
+    p.add_argument('--label_noise', type=float, default=0.0,
+                   help='symmetric label-noise rate applied to the training split')
     p.add_argument('--data_root',  type=str, default='./data')
     p.add_argument('--num_workers',type=int, default=4)
 
@@ -122,8 +129,16 @@ def run_id(args) -> str:
     """Human-readable run identifier used for checkpoint naming."""
     layers_str = '+'.join(args.layers) if args.layers else 'none'
     grid_str   = f'_G{args.grid_size}' if args.method == 'sgridlc' else ''
+    extra = ''
+    if args.imb_ratio   > 1.0:  extra += f'_imb{args.imb_ratio:g}'
+    if args.subset_frac < 1.0:  extra += f'_sub{args.subset_frac:g}'
+    if args.label_noise > 0.0:  extra += f'_noise{args.label_noise:g}'
+    if args.grad_mode  != 'off': extra += f'_grad{args.grad_mode}'
+    if args.peakedness != 'max': extra += f'_pk{args.peakedness}'
+    if args.norm       != 'max': extra += f'_nm{args.norm}'
+    if args.self_gamma:          extra += '_sg'
     return (f"{args.dataset}_{args.method}_rate{args.drop_rate}"
-            f"_{layers_str}{grid_str}_seed{args.seed}")
+            f"_{layers_str}{grid_str}{extra}_seed{args.seed}")
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +217,9 @@ def main():
     # ---- dataset ----
     train_loader, val_loader, num_classes, default_arch, default_pretrained = \
         get_dataset(args.dataset, args.data_root, args.batch_size, args.num_workers,
-                    strong_aug=args.strong_aug)
+                    strong_aug=args.strong_aug, imb_ratio=args.imb_ratio,
+                    subset_frac=args.subset_frac, label_noise=args.label_noise,
+                    seed=args.seed)
 
     arch       = args.arch       if args.arch       is not None else default_arch
     pretrained = args.pretrained if args.pretrained is not None else default_pretrained
