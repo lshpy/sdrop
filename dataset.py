@@ -138,9 +138,11 @@ def _ensure_cifar100(data_root: str):
     """Robust CIFAR-100 fetch.
 
     Strategy:
-      1. If cs.toronto.edu (the canonical host) is up, use it.
-      2. Otherwise download the HuggingFace `uoft-cs/cifar100` parquet
-         shards and convert them into torchvision's pickled format.
+      1. Download the HuggingFace `uoft-cs/cifar100` parquet shards and
+         convert them into torchvision's pickled format. This host is
+         CDN-backed and consistently fast.
+      2. Fall back to the canonical cs.toronto.edu tar.gz, which is often
+         throttled below 100 KB/s and can take half an hour for 169 MB.
     """
     import os, urllib.request, tarfile
     extracted = os.path.join(data_root, 'cifar-100-python')
@@ -148,20 +150,12 @@ def _ensure_cifar100(data_root: str):
         return
     os.makedirs(data_root, exist_ok=True)
 
-    # ---- attempt 1: original tar.gz mirror ----
+    # The canonical cs.toronto.edu host is frequently throttled to well under
+    # 100 KB/s, which turns a 169 MB fetch into a half-hour stall, so it is the
+    # *fallback* here rather than the first choice.
     target = os.path.join(data_root, 'cifar-100-python.tar.gz')
-    try:
-        print('  CIFAR-100: trying cs.toronto.edu tar.gz')
-        urllib.request.urlretrieve(
-            'https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz', target)
-        with tarfile.open(target) as t:
-            t.extractall(data_root)
-        print('  CIFAR-100 ready at', extracted)
-        return
-    except Exception as e:
-        print('  toronto mirror failed:', e)
 
-    # ---- attempt 2: HuggingFace parquet → repickle into torchvision format ----
+    # ---- attempt 1: HuggingFace parquet -> repickle into torchvision format ----
     try:
         print('  CIFAR-100: falling back to HuggingFace parquet mirror')
         import io, pickle, numpy as np
@@ -225,6 +219,18 @@ def _ensure_cifar100(data_root: str):
                 pickle.dump(obj, f)
             os.remove(tmp)
         print('  CIFAR-100 (from HF) ready at', extracted)
+        return
+    except Exception as e:
+        print('  HuggingFace mirror failed:', e)
+
+    # ---- attempt 3: canonical cs.toronto.edu tar.gz (often heavily throttled) ----
+    try:
+        print('  CIFAR-100: falling back to cs.toronto.edu tar.gz (may be slow)')
+        urllib.request.urlretrieve(
+            'https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz', target)
+        with tarfile.open(target) as t:
+            t.extractall(data_root)
+        print('  CIFAR-100 ready at', extracted)
         return
     except Exception as e:
         raise RuntimeError(f'all CIFAR-100 mirrors failed; last error: {e}')
