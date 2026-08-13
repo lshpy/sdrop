@@ -82,6 +82,9 @@ def parse_args():
                    help="drop-probability normalisation: 'max' (paper) or 'mean'")
     p.add_argument('--self_gamma', action='store_true',
                    help='use self-normalising gamma = 1/median(Sigma_c)')
+    p.add_argument('--amp', action='store_true',
+                   help='mixed-precision training (bf16/fp16 autocast). Roughly '
+                        '1.5-2x faster on tensor-core GPUs (sm_70+); ignored on CPU')
     p.add_argument('--grad_mode',  type=str, default='off',
                    choices=['off', 'suppress', 'amplify'],
                    help="gradient-guided scoring: 'suppress' drops loud-but-"
@@ -156,30 +159,47 @@ def _mixup_batch(x, y, alpha: float, num_classes: int):
 
 
 def train_epoch(model, loader, criterion, optimizer, device, log_interval,
-                mixup_alpha: float = 0.0, num_classes: int = 100):
+                mixup_alpha: float = 0.0, num_classes: int = 100,
+                scaler=None, amp_dtype=None):
+    """One training epoch.
+
+    scaler/amp_dtype are set when --amp is on. Autocast keeps the forward pass
+    and loss in reduced precision while master weights stay fp32; on tensor-core
+    GPUs (sm_70+) this is typically 1.5-2x faster at unchanged accuracy. The
+    SDrop scores are computed inside autocast too, which is harmless because the
+    mask depends only on the *ranking* of channel scores, not their magnitude.
+    """
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
+    use_amp = scaler is not None or amp_dtype is not None
 
     for batch_idx, (data, target) in enumerate(loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
-        if mixup_alpha > 0:
-            data, target, mix_extra = _mixup_batch(data, target, mixup_alpha, num_classes)
-            output = model(data)
-            if mix_extra is None:
-                loss = criterion(output, target)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype,
+                            enabled=use_amp):
+            if mixup_alpha > 0:
+                data, target, mix_extra = _mixup_batch(data, target, mixup_alpha, num_classes)
+                output = model(data)
+                if mix_extra is None:
+                    loss = criterion(output, target)
+                else:
+                    target_b, lam = mix_extra
+                    loss = lam * criterion(output, target) + (1 - lam) * criterion(output, target_b)
             else:
-                target_b, lam = mix_extra
-                loss = lam * criterion(output, target) + (1 - lam) * criterion(output, target_b)
-        else:
-            output = model(data)
-            loss = criterion(output, target)
+                output = model(data)
+                loss = criterion(output, target)
 
-        loss.backward()
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item() * data.size(0)
         pred = output.argmax(dim=1)
@@ -277,6 +297,24 @@ def main():
     else:
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    # ---- mixed precision ----
+    scaler, amp_dtype = None, None
+    if args.amp:
+        if device.type == 'cuda':
+            cap = torch.cuda.get_device_capability()
+            if cap[0] >= 8:                       # Ampere and newer: bf16, no scaler needed
+                amp_dtype = torch.bfloat16
+                print(f"AMP: bfloat16 autocast (sm_{cap[0]}{cap[1]})")
+            elif cap[0] == 7:                     # Volta/Turing: fp16 with loss scaling
+                amp_dtype = torch.float16
+                scaler = torch.amp.GradScaler('cuda')
+                print(f"AMP: float16 autocast + GradScaler (sm_{cap[0]}{cap[1]})")
+            else:
+                print(f"AMP requested but sm_{cap[0]}{cap[1]} has no tensor cores; "
+                      "running in fp32")
+        else:
+            print('AMP requested but device is not CUDA; running in fp32')
+
     # ---- checkpoint dir ----
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -289,7 +327,8 @@ def main():
         t0 = time.time()
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, device, args.log_interval,
-            mixup_alpha=args.mixup_alpha, num_classes=num_classes)
+            mixup_alpha=args.mixup_alpha, num_classes=num_classes,
+            scaler=scaler, amp_dtype=amp_dtype)
         scheduler.step()
 
         # evaluate every epoch

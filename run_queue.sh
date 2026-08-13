@@ -13,6 +13,10 @@ GROUP="${1:-all}"
 CKPT=./checkpoints
 mkdir -p "$CKPT" logs
 
+# AMP 기본 ON. 끄려면:  AMP=0 bash run_queue.sh
+AMP_FLAG=""
+[ "${AMP:-1}" = "1" ] && AMP_FLAG="--amp"
+
 run () {  # run <run_id> <train.py 인자...>
   local id="$1"; shift
   if [ -f "$CKPT/${id}_history.csv" ]; then
@@ -21,7 +25,7 @@ run () {  # run <run_id> <train.py 인자...>
   fi
   echo "──────────────────────────────────────────────────────────"
   echo "[실행] $id      $(date '+%F %T')"
-  python train.py "$@" 2>&1 | tee "logs/${id}.log"
+  python train.py "$@" $AMP_FLAG 2>&1 | tee "logs/${id}.log"
   echo "[완료] $id      $(date '+%F %T')"
 }
 
