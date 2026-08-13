@@ -215,11 +215,27 @@ class SDrop(nn.Module, DropRateMonitor):
         delta      : LRN energy exponent
         peakedness : 'max' (paper default) | 'entropy' (resolution-invariant)
         norm       : 'max' (paper default) | 'mean' (mean-preserving)
+        grad_mode  : 'off' (paper default)
+                     'suppress' — s_c <- s_c / (1 + |dL/da_c|), i.e. drop units
+                                  that are loud and diffuse but *task-irrelevant*
+                     'amplify'  — s_c <- s_c * (1 + |dL/da_c|), i.e. drop units
+                                  that are loud, diffuse and *loss-dominant*
+        grad_ema   : EMA momentum for the per-channel gradient magnitude
         eps        : numerical stability constant
+
+    The forward pass alone cannot know whether a high-energy channel is doing
+    useful work. The gradient magnitude |dL/da_c| supplies exactly that missing
+    signal, at no extra cost: it is captured by a hook during the backward pass
+    and reused on the next step (one-step-stale, as in gradient-based pruning).
+    Which direction is correct is an empirical question -- 'suppress' follows the
+    "drop loud but useless units" reading, 'amplify' the "drop the dominant
+    shortcut" reading -- so both are provided as an ablation.
     """
     def __init__(self, drop_rate: float = 0.1, score: str = 'egpg',
                  gamma: float = 1.0, delta: float = 1.0,
-                 peakedness: str = 'max', norm: str = 'max', eps: float = 1e-6):
+                 peakedness: str = 'max', norm: str = 'max',
+                 grad_mode: str = 'off', grad_ema: float = 0.9,
+                 eps: float = 1e-6):
         super().__init__()
         self.drop_rate = drop_rate
         self.score = score
@@ -227,22 +243,55 @@ class SDrop(nn.Module, DropRateMonitor):
         self.delta = delta
         self.peakedness = peakedness
         self.norm = norm
+        self.grad_mode = grad_mode
+        self.grad_ema = grad_ema
         self.eps = eps
+        self._grad_mag = None          # (C,) EMA of |dL/da_c|, normalised to mean 1
         self._init_monitor()
 
+    # -- gradient capture -------------------------------------------------
+    def _capture_grad(self, grad: torch.Tensor):
+        # grad: (B, C, H, W) -> per-channel magnitude, normalised to mean 1
+        g = grad.detach().abs().mean(dim=(0, 2, 3))
+        g = g / (g.mean() + self.eps)
+        if self._grad_mag is None or self._grad_mag.shape != g.shape:
+            self._grad_mag = g
+        else:
+            m = self.grad_ema
+            self._grad_mag = m * self._grad_mag.to(g.device) + (1.0 - m) * g
+
+    def _apply_grad_guidance(self, scores: torch.Tensor) -> torch.Tensor:
+        if self.grad_mode == 'off' or self._grad_mag is None:
+            return scores
+        g = self._grad_mag.to(scores.device).unsqueeze(0)      # (1, C)
+        if self.grad_mode == 'suppress':
+            return scores / (1.0 + g)
+        if self.grad_mode == 'amplify':
+            return scores * (1.0 + g)
+        raise ValueError(f"Unknown grad_mode: '{self.grad_mode}'. "
+                         "Choose 'off', 'suppress' or 'amplify'.")
+
+    # ---------------------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.training or self.drop_rate <= 0.0:
             return x
         scores = compute_score(x, self.score, self.gamma, self.delta,
                                self.peakedness, self.eps)          # (B, C)
+        if self.grad_mode != 'off':
+            scores = self._apply_grad_guidance(scores)
+            if x.requires_grad:
+                x.register_hook(self._capture_grad)
         mask = drop_mask_from_scores(scores, self.drop_rate, self.norm, self.eps)
         self._record(mask)
         return x * mask
 
     def extra_repr(self) -> str:
-        return (f"drop_rate={self.drop_rate}, score={self.score}, "
-                f"gamma={self.gamma}, delta={self.delta}, "
-                f"peakedness={self.peakedness}, norm={self.norm}")
+        s = (f"drop_rate={self.drop_rate}, score={self.score}, "
+             f"gamma={self.gamma}, delta={self.delta}, "
+             f"peakedness={self.peakedness}, norm={self.norm}")
+        if self.grad_mode != 'off':
+            s += f", grad_mode={self.grad_mode}, grad_ema={self.grad_ema}"
+        return s
 
 
 class SDropEnergy(SDrop):
@@ -351,7 +400,8 @@ _SCORE_OF_METHOD = {
 
 def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
                 gamma: float = 1.0, delta: float = 1.0,
-                peakedness: str = 'max', norm: str = 'max') -> nn.Module:
+                peakedness: str = 'max', norm: str = 'max',
+                grad_mode: str = 'off') -> nn.Module:
     """
     method: 'none' | 'dropout' | 'sdrop' | 'sdrop_energy'
           | 'sdrop_peak' | 'sdrop_random' | 'sgridlc'
@@ -370,7 +420,8 @@ def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
         return nn.Dropout(p=drop_rate)
     if method in _SCORE_OF_METHOD:
         return SDrop(drop_rate, score=_SCORE_OF_METHOD[method], gamma=gamma,
-                     delta=delta, peakedness=peakedness, norm=norm)
+                     delta=delta, peakedness=peakedness, norm=norm,
+                     grad_mode=grad_mode)
     if method == 'sgridlc':
         return SGridLC(drop_rate, grid_size, score='egpg', gamma=gamma,
                        delta=delta, peakedness=peakedness, norm=norm)

@@ -75,6 +75,10 @@ def parse_args():
                    help="drop-probability normalisation: 'max' (paper) or 'mean'")
     p.add_argument('--self_gamma', action='store_true',
                    help='use self-normalising gamma = 1/median(Sigma_c)')
+    p.add_argument('--grad_mode',  type=str, default='off',
+                   choices=['off', 'suppress', 'amplify'],
+                   help="gradient-guided scoring: 'suppress' drops loud-but-"
+                        "task-irrelevant units, 'amplify' drops loss-dominant ones")
 
     # Training hyperparameters
     p.add_argument('--epochs',     type=int,   default=200)
@@ -227,6 +231,7 @@ def main():
             peakedness=args.peakedness,
             norm=args.norm,
             gamma=(None if args.self_gamma else 1.0),
+            grad_mode=args.grad_mode,
             pretrained=pretrained,
         ).to(device)
 

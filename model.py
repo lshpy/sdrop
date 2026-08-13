@@ -88,7 +88,8 @@ class SDroResNet(nn.Module):
 def build_model(arch: str, num_classes: int, method: str,
                 drop_rate: float, layers: list, grid_size: int = 2,
                 peakedness: str = 'max', norm: str = 'max',
-                gamma: float = 1.0, pretrained: bool = False) -> SDroResNet:
+                gamma: float = 1.0, grad_mode: str = 'off',
+                pretrained: bool = False) -> SDroResNet:
     """
     Convenience builder.
 
@@ -121,9 +122,11 @@ def build_model(arch: str, num_classes: int, method: str,
         sdrop_l4 = build_baseline(method, drop_rate) if 'L4' in layers else None
     else:
         sdrop_l3 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
-                               peakedness=peakedness, norm=norm) if 'L3' in layers else None
+                               peakedness=peakedness, norm=norm,
+                               grad_mode=grad_mode) if 'L3' in layers else None
         sdrop_l4 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
-                               peakedness=peakedness, norm=norm) if 'L4' in layers else None
+                               peakedness=peakedness, norm=norm,
+                               grad_mode=grad_mode) if 'L4' in layers else None
 
     return SDroResNet(
         arch=arch,
