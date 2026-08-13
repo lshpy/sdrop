@@ -87,7 +87,7 @@ class SDroResNet(nn.Module):
 
 def build_model(arch: str, num_classes: int, method: str,
                 drop_rate: float, layers: list, grid_size: int = 2,
-                peakedness: str = 'max', norm: str = 'max',
+                peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
                 gamma: float = 1.0, grad_mode: str = 'off',
                 pretrained: bool = False) -> SDroResNet:
     """
@@ -99,7 +99,8 @@ def build_model(arch: str, num_classes: int, method: str,
         method      : 'none' | 'dropout' | 'dropout_std' | 'sdrop' | 'sdrop_energy'
                       | 'sdrop_peak' | 'sdrop_random' | 'sgridlc'
         peakedness  : 'max' (paper) | 'entropy' (resolution-invariant)
-        norm        : 'max' (paper) | 'mean' (mean-preserving)
+        norm        : 'max' (paper) | 'mean' (mean-preserving) | 'rank'
+        beta        : selection strength for norm='rank'; 0 = uniform
         gamma       : energy scale; None selects self-normalising gamma
         drop_rate   : drop probability
         layers      : list of insertion points, e.g. ['L3'], ['L4'], ['L3','L4']
@@ -122,7 +123,7 @@ def build_model(arch: str, num_classes: int, method: str,
         sdrop_l4 = build_baseline(method, drop_rate) if 'L4' in layers else None
     else:
         sdrop_l3 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
-                               peakedness=peakedness, norm=norm,
+                               peakedness=peakedness, norm=norm, beta=beta,
                                grad_mode=grad_mode) if 'L3' in layers else None
         sdrop_l4 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
                                peakedness=peakedness, norm=norm,

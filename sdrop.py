@@ -96,6 +96,11 @@ def entropy_peakedness(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         peakedness: (B, C)  in [0, 1]
     """
     B, C, H, W = x.shape
+    if H * W == 1:
+        # 공간 범위가 없으면 "퍼짐"이 정의되지 않는다. log(1)=0 으로 나누면
+        # NaN 이 나므로 0(=완전 확산)으로 두어 점수를 에너지 단독으로 축퇴시킨다.
+        # SGridLC 에서 grid_size 가 특징맵 한 변과 같을 때 이 경로를 탄다.
+        return torch.zeros(B, C, device=x.device, dtype=x.dtype)
     abs_x = x.abs().reshape(B, C, H * W)
     pi = abs_x / (abs_x.sum(dim=2, keepdim=True) + eps)
     ent = -(pi * (pi + eps).log()).sum(dim=2)                 # (B, C)
@@ -136,21 +141,37 @@ def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
 
 
 def drop_mask_from_scores(scores: torch.Tensor, drop_rate: float,
-                          norm: str = 'max', eps: float = 1e-6) -> torch.Tensor:
+                          norm: str = 'max', eps: float = 1e-6,
+                          beta: float = 1.0) -> torch.Tensor:
     """
     norm='max'  : p_drop,c = drop_rate * s_c / max_c(s_c)          (original)
     norm='mean' : p_drop,c = min(1, drop_rate * C * s_c / sum_c s_c)
+    norm='rank' : p_drop,c = drop_rate * (beta+1) * r_c^beta,
+                  r_c = rank(s_c)/(C-1) in [0, 1]
 
     With 'max' normalisation only the top-scoring channel is dropped at exactly
     drop_rate, so the expected dropped fraction is
         p_bar = drop_rate * mean_c(s_c) / max_c(s_c) <= drop_rate.
-    'mean' fixes the expected fraction at drop_rate exactly and is robust to a
-    single outlying channel score.
+    Measured on CIFAR-100-LT this is 0.017 against a nominal 0.1, and it drifts
+    during training as the score distribution sharpens, which makes comparisons
+    at equal nominal rate meaningless. 'mean' fixes the expectation but pushes
+    the top channel to drop_rate * max(s)/mean(s) -- 0.59 at the same setting,
+    inside the destructive regime.
+
+    'rank' fixes both. Ranks are uniform on [0, 1], so the expectation is
+    drop_rate * (beta+1) * INT_0^1 r^beta dr = drop_rate for every beta, and the
+    top channel is bounded by (beta+1) * drop_rate. beta = 0 gives a uniform
+    drop_rate for all channels, i.e. plain channel dropout, which makes the
+    random control a special case of the method rather than a separate baseline.
+    Only the ordering of s_c is used, so the rule is invariant to any monotone
+    rescaling of the score.
 
     mask[b, c] = Bernoulli(1 - p_drop,c)   (1 = keep, 0 = drop)
 
     Args:
         scores: (B, C)
+        beta:   selection strength, 'rank' only. 0 = uniform, higher = more
+                concentrated on the top-scoring channels.
     Returns:
         mask: (B, C, 1, 1)  float
     """
@@ -161,8 +182,15 @@ def drop_mask_from_scores(scores: torch.Tensor, drop_rate: float,
         C = scores.shape[1]
         denom = scores.sum(dim=1, keepdim=True).clamp(min=eps)
         drop_probs = (drop_rate * C * scores / denom).clamp(max=1.0)
+    elif norm == 'rank':
+        C = scores.shape[1]
+        if C < 2:
+            drop_probs = torch.full_like(scores, drop_rate)
+        else:
+            r = scores.argsort(dim=1).argsort(dim=1).to(scores.dtype) / (C - 1)
+            drop_probs = (drop_rate * (beta + 1.0) * r.pow(beta)).clamp(max=1.0)
     else:
-        raise ValueError(f"Unknown norm: '{norm}'. Choose 'max' or 'mean'.")
+        raise ValueError(f"Unknown norm: '{norm}'. Choose 'max', 'mean' or 'rank'.")
     keep = (torch.rand_like(drop_probs) > drop_probs).float()
     return keep.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
 
@@ -233,7 +261,7 @@ class SDrop(nn.Module, DropRateMonitor):
     """
     def __init__(self, drop_rate: float = 0.1, score: str = 'egpg',
                  gamma: float = 1.0, delta: float = 1.0,
-                 peakedness: str = 'max', norm: str = 'max',
+                 peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
                  grad_mode: str = 'off', grad_ema: float = 0.9,
                  eps: float = 1e-6):
         super().__init__()
@@ -243,6 +271,7 @@ class SDrop(nn.Module, DropRateMonitor):
         self.delta = delta
         self.peakedness = peakedness
         self.norm = norm
+        self.beta = beta
         self.grad_mode = grad_mode
         self.grad_ema = grad_ema
         self.eps = eps
@@ -281,7 +310,8 @@ class SDrop(nn.Module, DropRateMonitor):
             scores = self._apply_grad_guidance(scores)
             if x.requires_grad:
                 x.register_hook(self._capture_grad)
-        mask = drop_mask_from_scores(scores, self.drop_rate, self.norm, self.eps)
+        mask = drop_mask_from_scores(scores, self.drop_rate, self.norm, self.eps,
+                                    self.beta)
         self._record(mask)
         return x * mask
 
@@ -331,7 +361,8 @@ class SGridLC(nn.Module, DropRateMonitor):
     """
     def __init__(self, drop_rate: float = 0.1, grid_size: int = 2,
                  score: str = 'egpg', gamma: float = 1.0, delta: float = 1.0,
-                 peakedness: str = 'max', norm: str = 'max', eps: float = 1e-6):
+                 peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
+                 eps: float = 1e-6):
         super().__init__()
         self.drop_rate = drop_rate
         self.grid_size = grid_size
@@ -340,6 +371,7 @@ class SGridLC(nn.Module, DropRateMonitor):
         self.delta = delta
         self.peakedness = peakedness
         self.norm = norm
+        self.beta = beta
         self.eps = eps
         self._init_monitor()
 
@@ -370,7 +402,7 @@ class SGridLC(nn.Module, DropRateMonitor):
                 scores = compute_score(cell, self.score, self.gamma, self.delta,
                                        self.peakedness, self.eps)
                 cell_mask = drop_mask_from_scores(scores, self.drop_rate,
-                                                  self.norm, self.eps)
+                                                  self.norm, self.eps, self.beta)
                 mask[:, :, h0:h1, w0:w1] = cell_mask
 
         if pad_h > 0 or pad_w > 0:
@@ -400,7 +432,7 @@ _SCORE_OF_METHOD = {
 
 def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
                 gamma: float = 1.0, delta: float = 1.0,
-                peakedness: str = 'max', norm: str = 'max',
+                peakedness: str = 'max', norm: str = 'max', beta: float = 1.0,
                 grad_mode: str = 'off') -> nn.Module:
     """
     method: 'none' | 'dropout' | 'sdrop' | 'sdrop_energy'
@@ -420,11 +452,11 @@ def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
         return nn.Dropout(p=drop_rate)
     if method in _SCORE_OF_METHOD:
         return SDrop(drop_rate, score=_SCORE_OF_METHOD[method], gamma=gamma,
-                     delta=delta, peakedness=peakedness, norm=norm,
+                     delta=delta, peakedness=peakedness, norm=norm, beta=beta,
                      grad_mode=grad_mode)
     if method == 'sgridlc':
         return SGridLC(drop_rate, grid_size, score='egpg', gamma=gamma,
-                       delta=delta, peakedness=peakedness, norm=norm)
+                       delta=delta, peakedness=peakedness, norm=norm, beta=beta)
     raise ValueError(f"Unknown SDrop method: '{method}'. Choose from: none, dropout "
                      "(=SpatialDropout), dropout_std, spatialdropout, sdrop, "
                      "sdrop_energy, sdrop_peak, sdrop_random, sgridlc")

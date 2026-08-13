@@ -78,8 +78,14 @@ def parse_args():
                    help='G for SGridLC (grid cells per side)')
     p.add_argument('--peakedness', type=str, default='max', choices=['max', 'entropy'],
                    help="P_c definition: 'max' (paper) or 'entropy' (resolution-invariant)")
-    p.add_argument('--norm',       type=str, default='max', choices=['max', 'mean'],
-                   help="drop-probability normalisation: 'max' (paper) or 'mean'")
+    p.add_argument('--norm',       type=str, default='max',
+                   choices=['max', 'mean', 'rank'],
+                   help="drop-probability normalisation: 'max' (paper), 'mean', "
+                        "or 'rank' (effective rate equals nominal for any beta)")
+    p.add_argument('--beta',       type=float, default=1.0,
+                   help="selection strength for --norm rank. 0 reproduces uniform "
+                        "channel dropout; higher concentrates drops on top-scoring "
+                        "channels. Max drop probability is (beta+1)*drop_rate")
     p.add_argument('--self_gamma', action='store_true',
                    help='use self-normalising gamma = 1/median(Sigma_c)')
     p.add_argument('--amp', action='store_true',
@@ -139,6 +145,7 @@ def run_id(args) -> str:
     if args.grad_mode  != 'off': extra += f'_grad{args.grad_mode}'
     if args.peakedness != 'max': extra += f'_pk{args.peakedness}'
     if args.norm       != 'max': extra += f'_nm{args.norm}'
+    if args.norm == 'rank':      extra += f'_b{args.beta:g}'
     if args.self_gamma:          extra += '_sg'
     return (f"{args.dataset}_{args.method}_rate{args.drop_rate}"
             f"_{layers_str}{grid_str}{extra}_seed{args.seed}")
@@ -267,6 +274,7 @@ def main():
             grid_size=args.grid_size,
             peakedness=args.peakedness,
             norm=args.norm,
+            beta=args.beta,
             gamma=(None if args.self_gamma else 1.0),
             grad_mode=args.grad_mode,
             pretrained=pretrained,
