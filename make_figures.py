@@ -208,6 +208,34 @@ def fig_participation():
     save(fig, 'fig_participation')
 
 
+# ── fig_beta_curve: 선택 강도 beta 에 따른 정확도 (가족 스윕) ──────────────
+
+def fig_beta_curve():
+    """(w=0.5 고정) beta 0/1/2/4 곡선. beta=0 이 무작위 대조군.
+    완료된 런이 2개 미만이면 건너뛴다."""
+    pts = []
+    for b in (0, 1, 2, 4):
+        h = history(f'cifar100_lt_sdrop_rate0.1_L4_imb100_pkentropy_nmrank_b{b}_mix0.5_seed0')
+        if h and len(h) >= 200:
+            pts.append((b, max(float(r['acc']) for r in h)))
+    if len(pts) < 2:
+        print('  fig_beta_curve: 완료 런 부족, 건너뜀')
+        return
+    bs, accs = zip(*pts)
+    fig, ax = plt.subplots(figsize=(4.6, 2.7))
+    ax.plot(bs, accs, color=C_MEAN, lw=2.0, marker='o', ms=8,
+            mfc=C_MEAN, mec='white', mew=1.2, zorder=4)
+    for b, a in pts:
+        ax.annotate(f'{a:.2f}', xy=(b, a), xytext=(0, 9),
+                    textcoords='offset points', ha='center', color=INK, fontsize=8)
+    ax.annotate('$\\beta=0$: uniform drop\n(random control)', xy=(bs[0], accs[0]),
+                xytext=(12, -14), textcoords='offset points', color=INK2, fontsize=8)
+    ax.set_xlabel('selection strength $\\beta$  (rank normalisation, $\\bar{p}=0.1$ for all)')
+    ax.set_ylabel('best val. accuracy (%)')
+    ax.set_xticks(bs)
+    save(fig, 'fig_beta_curve')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--no-gpu', action='store_true',
@@ -217,6 +245,7 @@ def main():
     print('그림 생성:')
     fig_effective_rate()
     fig_rate_matched()
+    fig_beta_curve()
     if not args.no_gpu:
         fig_participation()
     print('완료. 출력 위치:', ', '.join(OUT_DIRS))
