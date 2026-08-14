@@ -128,7 +128,8 @@ def build_model(arch: str, num_classes: int, method: str,
                                mix=mix,
                                grad_mode=grad_mode) if 'L3' in layers else None
         sdrop_l4 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
-                               peakedness=peakedness, norm=norm,
+                               peakedness=peakedness, norm=norm, beta=beta,
+                               mix=mix,
                                grad_mode=grad_mode) if 'L4' in layers else None
 
     return SDroResNet(
