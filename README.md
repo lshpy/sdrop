@@ -7,6 +7,12 @@ Accepted at **XAI-2026** — *The 4th World Conference on eXplainable Artificial
 
 ---
 
+## Paper
+
+[SDrop: A Demonstration of Explainable Channel-Selective Regularization for Preserving Rare Features](paper/SDrop_XAI2026_demo.pdf) — XAI-2026, Demo Track (Paper 8770).
+
+---
+
 ## Quick Summary
 
 SDrop drops the **most dominant channels** during training instead of random or weak ones.  
