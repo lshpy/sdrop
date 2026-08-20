@@ -54,17 +54,23 @@ if want must; then
       $C --method dropout --drop_rate 0.1 --layers L4 --seed 0
   # B. ViT 시드 3→5 확장 (CI가 0을 걸치는 문제)
   for s in 3 4; do
-    run "cifar100_vit_seed${s}" \
+    run "cifar100_vit_rate0.1_none_seed${s}" \
         --dataset cifar100 --method vit $VIT --seed "$s"
-    run "cifar100_sdrop_vit_rate0.3_L3L4_seed${s}" \
+    run "cifar100_sdrop_vit_rate0.3_L3+L4_seed${s}" \
         --dataset cifar100 --method sdrop_vit --drop_rate 0.3 --layers L3 L4 $VIT --seed "$s"
   done
+  # C. post-softmax 점수 아블레이션 (원고 3.6절 방어).
+  #    비교 대상은 이미 있는 200ep seed0 pre-softmax 런이므로 200ep로 맞춘다.
+  #    (train.py의 run_id는 epochs를 포함하지 않아 100ep로 돌리면 기존 파일을 덮어씀)
+  run "cifar100_sdrop_vit_rate0.3_L3+L4_scorepost_seed0" \
+      --dataset cifar100 --method sdrop_vit --drop_rate 0.3 --layers L3 L4 \
+      --vit_score post $VIT --seed 0
 fi
 
 if want should; then
   # E. 드롭률 스윕 (100에폭 단축 — 논문에 명시할 것)
   for p in 0.05 0.2 0.3 0.5; do
-    run "cifar100_sdrop_energy_rate${p}_L4_ep100_seed0" \
+    run "cifar100_sdrop_energy_rate${p}_L4_seed0" \
         --dataset cifar100 --method sdrop_energy --drop_rate "$p" --layers L4 --epochs 100 --seed 0
   done
   # F. SGridLC seed 0 + 층 위치
@@ -72,23 +78,23 @@ if want should; then
       $C --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 4 --seed 0
   run "cifar100_sdrop_energy_rate0.1_L3_seed0" \
       $C --method sdrop_energy --drop_rate 0.1 --layers L3 --seed 0
-  run "cifar100_sdrop_energy_rate0.1_L3L4_seed0" \
+  run "cifar100_sdrop_energy_rate0.1_L3+L4_seed0" \
       $C --method sdrop_energy --drop_rate 0.1 --layers L3 L4 --seed 0
 fi
 
 if want nice; then
   # G. 정밀화 옵션 아블레이션 (원고가 "natural ablation"으로 예고한 것)
-  run "cifar100_sdrop_rate0.1_L4_normmean_seed0" \
+  run "cifar100_sdrop_rate0.1_L4_nmmean_seed0" \
       $C --method sdrop --drop_rate 0.1 --layers L4 --norm mean --seed 0
-  run "cifar100_sdrop_rate0.1_L4_peakentropy_seed0" \
+  run "cifar100_sdrop_rate0.1_L4_pkentropy_seed0" \
       $C --method sdrop --drop_rate 0.1 --layers L4 --peakedness entropy --seed 0
   run "cifar100_sdrop_rate0.1_L4_sg_seed0" \
       $C --method sdrop --drop_rate 0.1 --layers L4 --self_gamma --seed 0
   # H. ViT 층 위치 스윕 (100에폭)
-  run "cifar100_sdrop_vit_rate0.3_L3_ep100_seed0" \
+  run "cifar100_sdrop_vit_rate0.3_L3_seed0" \
       --dataset cifar100 --method sdrop_vit --drop_rate 0.3 --layers L3 \
       --epochs 100 --lr 1e-3 --strong_aug --mixup_alpha 0.2 --warmup_epochs 10 --label_smoothing 0.1 --seed 0
-  run "cifar100_sdrop_vit_full_rate0.3_ep100_seed0" \
+  run "cifar100_sdrop_vit_full_rate0.3_none_seed0" \
       --dataset cifar100 --method sdrop_vit_full --drop_rate 0.3 \
       --epochs 100 --lr 1e-3 --strong_aug --mixup_alpha 0.2 --warmup_epochs 10 --label_smoothing 0.1 --seed 0
 fi
