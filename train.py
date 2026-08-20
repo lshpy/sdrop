@@ -78,8 +78,11 @@ def parse_args():
                    help='G for SGridLC (grid cells per side)')
     p.add_argument('--peakedness', type=str, default='max', choices=['max', 'entropy'],
                    help="P_c definition: 'max' (paper) or 'entropy' (resolution-invariant)")
-    p.add_argument('--norm',       type=str, default='max', choices=['max', 'mean'],
-                   help="drop-probability normalisation: 'max' (paper) or 'mean'")
+    p.add_argument('--norm',       type=str, default='mean', choices=['max', 'mean'],
+                   help="drop-probability normalisation. 'mean' (default, Eq. 6b) "
+                        "realises the nominal drop rate exactly. 'max' (Eq. 6) "
+                        "applies the intervention at only mean(s)/max(s) of the "
+                        "nominal strength -- see Eq. 7.")
     p.add_argument('--vit_score',  type=str, default='pre', choices=['pre', 'post'],
                    help="ViT head scoring source: pre-softmax logits (default) or "
                         "post-softmax attention (ablation for Sec. 3.6).")
@@ -131,6 +134,13 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+# Methods whose drop probability passes through drop_mask_from_scores() and
+# therefore depend on --norm. Everything else (none, dropout, dropout_std,
+# plain vit) ignores it, so tagging those would only add noise to filenames.
+_SCORE_METHODS = {'sdrop', 'sdrop_energy', 'sdrop_peak', 'sdrop_random',
+                  'sgridlc', 'sdrop_vit', 'sdrop_vit_full'}
+
+
 def run_id(args) -> str:
     """Human-readable run identifier used for checkpoint naming."""
     layers_str = '+'.join(args.layers) if args.layers else 'none'
@@ -141,7 +151,9 @@ def run_id(args) -> str:
     if args.label_noise > 0.0:  extra += f'_noise{args.label_noise:g}'
     if args.grad_mode  != 'off': extra += f'_grad{args.grad_mode}'
     if args.peakedness != 'max': extra += f'_pk{args.peakedness}'
-    if args.norm       != 'max': extra += f'_nm{args.norm}'
+    # Always tag score-based methods: the default flipped to 'mean', so an
+    # untagged legacy filename must keep meaning the old 'max' run.
+    if args.method in _SCORE_METHODS: extra += f'_nm{args.norm}'
     if args.self_gamma:          extra += '_sg'
     if args.vit_score == 'post': extra += '_scorepost'
     return (f"{args.dataset}_{args.method}_rate{args.drop_rate}"
