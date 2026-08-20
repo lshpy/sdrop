@@ -26,6 +26,8 @@ Reference:
   in preparation, 2026). Short version: Neurocomputing, under review.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -305,6 +307,106 @@ class SDropEnergy(SDrop):
 # SGridLC  (spatially-aware)
 # ---------------------------------------------------------------------------
 
+class SDropClassAware(SDrop, DropRateMonitor):
+    """Class-aware SDrop:  s_c = E_c * (1 - Sel_c).
+
+    The spatial peakedness P_c in the original EGPG score is a *within-sample*
+    statistic: it says how concentrated a channel is over space, and knows
+    nothing about classes. The monopolisation hypothesis, however, is a
+    statement about classes -- a few channels are recruited by many classes at
+    once, leaving rare classes with nothing to claim. This variant measures
+    that directly.
+
+    A running (C, K) table accumulates how strongly each class k drives each
+    channel c. Normalising a channel's row into a distribution pi_c over
+    classes, its *class selectivity* is
+
+        Sel_c = 1 - H(pi_c) / log K        in [0, 1]
+
+    so Sel_c ~ 1 for a channel used by a single class (a rare class's lifeline,
+    which must be protected) and Sel_c ~ 0 for a channel spread evenly over
+    every class (a monopolist, which is what we want to drop). Pairing it with
+    the same energy term keeps Proposition 1 intact: E_c is unchanged, and only
+    the second factor is replaced.
+
+    Labels are supplied per batch by the training loop via `set_targets`;
+    with none provided the module falls back to the spatial score, so it stays
+    usable in eval-only or label-free settings.
+    """
+
+    def __init__(self, drop_rate: float = 0.1, num_classes: int = 100,
+                 usage_ema: float = 0.99, warmup_batches: int = 50, **kw):
+        kw.setdefault('score', 'egpg')
+        super().__init__(drop_rate=drop_rate, **kw)
+        self.num_classes = num_classes
+        self.usage_ema = usage_ema
+        self.warmup_batches = warmup_batches
+        self._usage = None            # (C, K) running class-channel usage
+        self._seen = 0
+        self._targets = None
+
+    def set_targets(self, y: torch.Tensor):
+        """Called by the training loop just before the forward pass."""
+        self._targets = y
+
+    @torch.no_grad()
+    def _update_usage(self, x: torch.Tensor, y: torch.Tensor):
+        # per-sample channel strength, then scatter-mean into the class rows
+        a = x.detach().abs().mean(dim=(2, 3))                  # (B, C)
+        C, K = a.shape[1], self.num_classes
+        if self._usage is None or self._usage.shape != (C, K):
+            self._usage = torch.zeros(C, K, device=a.device, dtype=a.dtype)
+        batch = torch.zeros(C, K, device=a.device, dtype=a.dtype)
+        count = torch.zeros(K, device=a.device, dtype=a.dtype)
+        batch.index_add_(1, y, a.t())
+        count.index_add_(0, y, torch.ones_like(y, dtype=a.dtype))
+        present = count > 0
+        batch[:, present] /= count[present]
+        m = self.usage_ema
+        self._usage = self._usage.to(a.device)
+        self._usage[:, present] = (m * self._usage[:, present]
+                                   + (1.0 - m) * batch[:, present])
+        self._seen += 1
+
+    def _selectivity(self, device, dtype) -> torch.Tensor:
+        """Sel_c in [0, 1]; 1 = used by one class only."""
+        u = self._usage.to(device=device, dtype=dtype).clamp_min(0)
+        pi = u / (u.sum(dim=1, keepdim=True) + self.eps)        # (C, K)
+        H = -(pi * (pi + self.eps).log()).sum(dim=1)            # (C,)
+        return (1.0 - H / math.log(self.num_classes)).clamp(0.0, 1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_rate <= 0.0:
+            return x
+
+        y = self._targets
+        if y is not None:
+            self._update_usage(x, y.to(x.device))
+
+        energy = channel_energy(x, self.gamma, self.delta, self.eps)   # (B, C)
+
+        if self._usage is None or self._seen < self.warmup_batches:
+            # not enough class statistics yet -- fall back to the spatial score
+            scores = energy * (1.0 - _peakedness(x, self.peakedness, self.eps))
+        else:
+            sel = self._selectivity(x.device, x.dtype).unsqueeze(0)    # (1, C)
+            scores = energy * (1.0 - sel)
+
+        if self.grad_mode != 'off':
+            scores = self._apply_grad_guidance(scores)
+            if x.requires_grad:
+                x.register_hook(self._capture_grad)
+
+        mask = drop_mask_from_scores(scores, self.drop_rate, self.norm, self.eps)
+        self._record(mask)
+        return x * mask
+
+    def extra_repr(self) -> str:
+        return (f"drop_rate={self.drop_rate}, score=class-aware, "
+                f"num_classes={self.num_classes}, usage_ema={self.usage_ema}, "
+                f"warmup_batches={self.warmup_batches}, norm={self.norm}")
+
+
 class SGridLC(nn.Module, DropRateMonitor):
     """
     Spatially-Aware Local Feature Density Control.
@@ -399,12 +501,13 @@ _SCORE_OF_METHOD = {
 
 
 def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
+                num_classes: int = 100,
                 gamma: float = 1.0, delta: float = 1.0,
                 peakedness: str = 'max', norm: str = 'max',
                 grad_mode: str = 'off') -> nn.Module:
     """
     method: 'none' | 'dropout' | 'sdrop' | 'sdrop_energy'
-          | 'sdrop_peak' | 'sdrop_random' | 'sgridlc'
+          | 'sdrop_peak' | 'sdrop_random' | 'sdrop_class' | 'sgridlc'
     """
     if method == 'none':
         return nn.Identity()
@@ -418,6 +521,10 @@ def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
     if method == 'dropout_std':
         # element-wise dropout (Srivastava et al., 2014)
         return nn.Dropout(p=drop_rate)
+    if method == 'sdrop_class':
+        return SDropClassAware(drop_rate, num_classes=num_classes, gamma=gamma,
+                               peakedness=peakedness, norm=norm,
+                               grad_mode=grad_mode)
     if method in _SCORE_OF_METHOD:
         return SDrop(drop_rate, score=_SCORE_OF_METHOD[method], gamma=gamma,
                      delta=delta, peakedness=peakedness, norm=norm,

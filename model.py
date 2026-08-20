@@ -151,10 +151,12 @@ def build_model(arch: str, num_classes: int, method: str,
         sdrop_l3 = build_baseline(method, drop_rate) if 'L3' in layers else None
         sdrop_l4 = build_baseline(method, drop_rate) if 'L4' in layers else None
     else:
-        sdrop_l3 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
+        sdrop_l3 = build_sdrop(method, drop_rate, grid_size,
+                               num_classes=num_classes, gamma=gamma,
                                peakedness=peakedness, norm=norm,
                                grad_mode=grad_mode) if 'L3' in layers else None
-        sdrop_l4 = build_sdrop(method, drop_rate, grid_size, gamma=gamma,
+        sdrop_l4 = build_sdrop(method, drop_rate, grid_size,
+                               num_classes=num_classes, gamma=gamma,
                                peakedness=peakedness, norm=norm,
                                grad_mode=grad_mode) if 'L4' in layers else None
 

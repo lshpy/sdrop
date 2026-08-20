@@ -73,6 +73,7 @@ def parse_args():
     p.add_argument('--method',     type=str, default='none',
                    choices=['none', 'dropout', 'dropout_std', 'spatialdropout',
                             'sdrop', 'sdrop_energy', 'sdrop_peak', 'sdrop_random',
+                            'sdrop_class',
                             'sgridlc', 'dropblock', 'senet', 'cbam',
                             'vit', 'sdrop_vit', 'sdrop_vit_full'])
     p.add_argument('--drop_rate',  type=float, default=0.1)
@@ -143,7 +144,15 @@ def set_seed(seed: int):
 # therefore depend on --norm. Everything else (none, dropout, dropout_std,
 # plain vit) ignores it, so tagging those would only add noise to filenames.
 _SCORE_METHODS = {'sdrop', 'sdrop_energy', 'sdrop_peak', 'sdrop_random',
+                  'sdrop_class',
                   'sgridlc', 'sdrop_vit', 'sdrop_vit_full'}
+
+
+def _set_sdrop_targets(model, target):
+    """Hand this batch's labels to every class-aware SDrop module."""
+    for m in model.modules():
+        if hasattr(m, 'set_targets'):
+            m.set_targets(target)
 
 
 def run_id(args) -> str:
@@ -199,6 +208,10 @@ def train_epoch(model, loader, criterion, optimizer, device, log_interval,
 
     for batch_idx, (data, target) in enumerate(loader):
         data, target = data.to(device), target.to(device)
+        # Class-aware SDrop needs the labels to update its class-channel usage
+        # table. Pass the *pre-mixup* targets: mixed labels would smear the
+        # per-class statistics the score depends on.
+        _set_sdrop_targets(model, target)
         optimizer.zero_grad()
 
         with torch.autocast(device_type=device.type, dtype=amp_dtype,
