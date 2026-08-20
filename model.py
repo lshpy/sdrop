@@ -16,6 +16,41 @@ from sdrop import build_sdrop
 from baselines import build_baseline
 
 
+def _resnet18_cifar(num_classes: int, width_mult: float = 1.0,
+                    pretrained: bool = False):
+    """CIFAR-adapted ResNet-18 whose stage widths scale by `width_mult`.
+
+    Narrowing the network is how we manipulate *channel scarcity*. SDrop's
+    hypothesis is that a few channels monopolise the representation, so its
+    effect should grow as channels become scarce relative to the number of
+    classes. width_mult=1.0 reproduces the standard 64/128/256/512 stages.
+    """
+    from torchvision.models.resnet import ResNet, BasicBlock
+
+    if pretrained and width_mult != 1.0:
+        raise ValueError('pretrained weights only exist for width_mult=1.0')
+
+    m = models.resnet18(weights='IMAGENET1K_V1' if pretrained else None)
+    planes = [max(8, int(round(c * width_mult))) for c in (64, 128, 256, 512)]
+
+    if width_mult != 1.0:
+        m.inplanes = planes[0]
+        m.bn1 = nn.BatchNorm2d(planes[0])
+        m.layer1 = m._make_layer(BasicBlock, planes[0], 2)
+        m.layer2 = m._make_layer(BasicBlock, planes[1], 2, stride=2)
+        m.layer3 = m._make_layer(BasicBlock, planes[2], 2, stride=2)
+        m.layer4 = m._make_layer(BasicBlock, planes[3], 2, stride=2)
+        m.fc = nn.Linear(planes[3] * BasicBlock.expansion, num_classes)
+    else:
+        m.fc = nn.Linear(m.fc.in_features, num_classes)
+
+    # CIFAR adaptation: 3x3 stride-1 stem, no maxpool
+    m.conv1 = nn.Conv2d(3, planes[0], kernel_size=3, stride=1,
+                        padding=1, bias=False)
+    m.maxpool = nn.Identity()
+    return m
+
+
 class SDroResNet(nn.Module):
     """
     ResNet with optional SDrop at L3 and/or L4.
@@ -29,25 +64,19 @@ class SDroResNet(nn.Module):
     """
     def __init__(self, arch: str = 'resnet18', num_classes: int = 100,
                  sdrop_l3: nn.Module = None, sdrop_l4: nn.Module = None,
-                 pretrained: bool = False):
+                 pretrained: bool = False, width_mult: float = 1.0):
         super().__init__()
 
-        weights = 'IMAGENET1K_V1' if pretrained else None
         if arch == 'resnet18':
-            backbone = models.resnet18(weights=weights)
-            # CIFAR-100 adaptation: replace 7×7 stride-2 conv with 3×3 stride-1
-            # and remove maxpool so spatial resolution is preserved longer
-            backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1,
-                                       padding=1, bias=False)
-            backbone.maxpool = nn.Identity()
+            backbone = _resnet18_cifar(num_classes, width_mult, pretrained)
         elif arch == 'resnet50':
-            backbone = models.resnet50(weights=weights)
+            if width_mult != 1.0:
+                raise ValueError('width_mult is only implemented for resnet18')
+            backbone = models.resnet50(
+                weights='IMAGENET1K_V1' if pretrained else None)
+            backbone.fc = nn.Linear(backbone.fc.in_features, num_classes)
         else:
             raise ValueError(f"Unsupported arch: '{arch}'. Use 'resnet18' or 'resnet50'.")
-
-        # replace classifier head
-        in_features = backbone.fc.in_features
-        backbone.fc = nn.Linear(in_features, num_classes)
 
         # store sub-modules individually so state_dict / parameters work correctly
         self.conv1   = backbone.conv1
@@ -87,9 +116,10 @@ class SDroResNet(nn.Module):
 
 def build_model(arch: str, num_classes: int, method: str,
                 drop_rate: float, layers: list, grid_size: int = 2,
-                peakedness: str = 'max', norm: str = 'max',
+                peakedness: str = 'max', norm: str = 'mean',
                 gamma: float = 1.0, grad_mode: str = 'off',
-                pretrained: bool = False) -> SDroResNet:
+                pretrained: bool = False,
+                width_mult: float = 1.0) -> SDroResNet:
     """
     Convenience builder.
 
@@ -134,4 +164,5 @@ def build_model(arch: str, num_classes: int, method: str,
         sdrop_l3=sdrop_l3,
         sdrop_l4=sdrop_l4,
         pretrained=pretrained,
+        width_mult=width_mult,
     )

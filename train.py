@@ -59,6 +59,11 @@ def parse_args():
     p.add_argument('--num_workers',type=int, default=4)
 
     # Model
+    p.add_argument('--width_mult', type=float, default=1.0,
+                   help='Scale ResNet-18 stage widths (64/128/256/512 x this). '
+                        'Narrowing makes channels scarce, which is the condition '
+                        'under which the monopolisation hypothesis predicts a '
+                        'larger SDrop effect.')
     p.add_argument('--arch',       type=str, default=None,
                    help='Override default arch (resnet18/resnet50)')
     p.add_argument('--pretrained', action='store_true', default=None,
@@ -155,6 +160,7 @@ def run_id(args) -> str:
     # untagged legacy filename must keep meaning the old 'max' run.
     if args.method in _SCORE_METHODS: extra += f'_nm{args.norm}'
     if args.self_gamma:          extra += '_sg'
+    if args.width_mult != 1.0:   extra += f'_w{args.width_mult:g}'
     if args.vit_score == 'post': extra += '_scorepost'
     return (f"{args.dataset}_{args.method}_rate{args.drop_rate}"
             f"_{layers_str}{grid_str}{extra}_seed{args.seed}")
@@ -286,6 +292,7 @@ def main():
             gamma=(None if args.self_gamma else 1.0),
             grad_mode=args.grad_mode,
             pretrained=pretrained,
+            width_mult=args.width_mult,
         ).to(device)
 
     print(f"Model: {arch}  |  SDrop: {args.method}  |  "
