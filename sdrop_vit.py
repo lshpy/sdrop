@@ -105,7 +105,8 @@ class SDropMultiheadSelfAttention(nn.Module):
 
     def __init__(self, dim: int, num_heads: int = 6, qkv_bias: bool = True,
                  attn_drop: float = 0.0, proj_drop: float = 0.0,
-                 sdrop_rate: float = 0.0, gamma: float = 1.0, delta: float = 1.0):
+                 sdrop_rate: float = 0.0, gamma: float = 1.0, delta: float = 1.0,
+                 score_input: str = "pre"):
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
         self.dim = dim
@@ -122,6 +123,8 @@ class SDropMultiheadSelfAttention(nn.Module):
         self.sdrop_rate = float(sdrop_rate)
         self.gamma = float(gamma)
         self.delta = float(delta)
+        assert score_input in ("pre", "post"), score_input
+        self.score_input = score_input
 
         # Diagnostics: store the latest score / mask for visualization
         self.last_scores: Optional[torch.Tensor] = None
@@ -142,7 +145,8 @@ class SDropMultiheadSelfAttention(nn.Module):
             with torch.no_grad():
                 # Score from pre-softmax logits — preserves head-magnitude
                 # differences that vanish after softmax.
-                scores = head_egpg(attn_logits, self.gamma, self.delta)   # (B, H)
+                _src = attn_logits if self.score_input == "pre" else attn
+                scores = head_egpg(_src, self.gamma, self.delta)   # (B, H)
                 mask = head_drop_mask(scores, self.sdrop_rate)             # (B, H)
                 self.last_scores = scores.detach()
                 self.last_mask = mask.detach()
@@ -201,13 +205,15 @@ class Block(nn.Module):
 
     def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0,
                  qkv_bias: bool = True, drop: float = 0.0, attn_drop: float = 0.0,
-                 sdrop_rate: float = 0.0, gamma: float = 1.0, delta: float = 1.0):
+                 sdrop_rate: float = 0.0, gamma: float = 1.0, delta: float = 1.0,
+                 score_input: str = "pre"):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = SDropMultiheadSelfAttention(
             dim=dim, num_heads=num_heads, qkv_bias=qkv_bias,
             attn_drop=attn_drop, proj_drop=drop,
             sdrop_rate=sdrop_rate, gamma=gamma, delta=delta,
+            score_input=score_input,
         )
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, hidden_dim=int(dim * mlp_ratio), drop=drop)
@@ -232,6 +238,7 @@ class SDropViT(nn.Module):
                  num_heads: int = 3, mlp_ratio: float = 4.0, qkv_bias: bool = True,
                  drop_rate: float = 0.0, attn_drop_rate: float = 0.0,
                  sdrop_rate: float = 0.0, sdrop_layers=("L3", "L4"),
+                 score_input: str = "pre",
                  gamma: float = 1.0, delta: float = 1.0):
         super().__init__()
         self.num_classes = num_classes
@@ -256,7 +263,7 @@ class SDropViT(nn.Module):
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, drop=drop_rate, attn_drop=attn_drop_rate,
                 sdrop_rate=sdrop_rate if i in sdrop_indices else 0.0,
-                gamma=gamma, delta=delta,
+                gamma=gamma, delta=delta, score_input=score_input,
             )
             for i in range(depth)
         ])
@@ -295,7 +302,8 @@ class SDropViT(nn.Module):
 
 def build_sdrop_vit(num_classes: int = 100, img_size: int = 32,
                     method: str = "sdrop_vit", drop_rate: float = 0.1,
-                    layers=("L3", "L4"), gamma: float = 100.0, delta: float = 1.0):
+                    layers=("L3", "L4"), gamma: float = 100.0, delta: float = 1.0,
+                    score_input: str = "pre"):
     """gamma defaulted to 100 to amplify per-head differences in pre-softmax
     attention logits, which are typically two orders of magnitude smaller
     than CNN feature activations."""
@@ -323,7 +331,7 @@ def build_sdrop_vit(num_classes: int = 100, img_size: int = 32,
         img_size=img_size, patch_size=4, in_chans=3, num_classes=num_classes,
         embed_dim=192, depth=12, num_heads=3, mlp_ratio=4.0,
         sdrop_rate=sdrop_rate, sdrop_layers=sdrop_layers,
-        gamma=gamma, delta=delta,
+        gamma=gamma, delta=delta, score_input=score_input,
     )
 
 

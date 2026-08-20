@@ -80,6 +80,9 @@ def parse_args():
                    help="P_c definition: 'max' (paper) or 'entropy' (resolution-invariant)")
     p.add_argument('--norm',       type=str, default='max', choices=['max', 'mean'],
                    help="drop-probability normalisation: 'max' (paper) or 'mean'")
+    p.add_argument('--vit_score',  type=str, default='pre', choices=['pre', 'post'],
+                   help="ViT head scoring source: pre-softmax logits (default) or "
+                        "post-softmax attention (ablation for Sec. 3.6).")
     p.add_argument('--self_gamma', action='store_true',
                    help='use self-normalising gamma = 1/median(Sigma_c)')
     p.add_argument('--amp', action='store_true',
@@ -140,6 +143,7 @@ def run_id(args) -> str:
     if args.peakedness != 'max': extra += f'_pk{args.peakedness}'
     if args.norm       != 'max': extra += f'_nm{args.norm}'
     if args.self_gamma:          extra += '_sg'
+    if args.vit_score == 'post': extra += '_scorepost'
     return (f"{args.dataset}_{args.method}_rate{args.drop_rate}"
             f"_{layers_str}{grid_str}{extra}_seed{args.seed}")
 
@@ -254,7 +258,7 @@ def main():
         model = build_sdrop_vit(
             num_classes=num_classes, img_size=img_size,
             method=args.method, drop_rate=args.drop_rate,
-            layers=args.layers,
+            layers=args.layers, score_input=args.vit_score,
         ).to(device)
         arch = f"vit-tiny-p4-d12-h3"
     else:

@@ -23,3 +23,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+sdrop_vit.py.bak
+train.py.bak
