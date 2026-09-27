@@ -1,7 +1,7 @@
 """
 Suppressive Dropout (SDrop)
 ----------------------------
-Score variants implemented from the paper:
+Score variants:
 
   SDrop        : full EGPG score   s_c = E_c * (1 - P_c)
   SDropEnergy  : energy only       s_c = E_c
@@ -13,17 +13,15 @@ All variants:
   - During training : stochastically drop channels proportional to their score
   - During eval     : pass-through (no dropout, no rescaling needed)
 
-Two score refinements introduced with the Springer ML extension, both
-off by default so that previously reported numbers remain reproducible:
+Optional score refinements:
 
-  peakedness='entropy'  : resolution-invariant peakedness (Eq. 4b)
-  norm='mean'           : mean-preserving drop probability (Eq. 6b)
-  gamma=None            : self-normalising energy scale (Eq. 3b)
+  peakedness='entropy'  : resolution-invariant peakedness
+  norm='mean'           : mean-preserving drop probability (realises the nominal rate)
+  gamma=None            : self-normalising energy scale
 
 Reference:
-  Lee, S. & Longo, L. "Suppressive Dropout: A Bio-Inspired and Explainable
-  Channel-Selective Regularization Framework." (Springer Machine Learning,
-  in preparation, 2026). Short version: Neurocomputing, under review.
+  Lee, S. "Suppressive Dropout" (xAI 2026 Late-Breaking Work / Demo).
+  An extended journal version is in preparation.
 """
 
 import math
@@ -122,7 +120,15 @@ def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
       'energy'  : s_c = E_c                 energy only
       'peak'    : s_c = (1 - P_c)           peakedness only   [ablation]
       'random'  : s_c = 1                   uniform            [ablation control]
+      'gap'     : s_c = mean_hw |x_c|       pure activation magnitude [ablation]
+
+    'gap' is the channel version of the score used by WCD (AAAI'19) / ProbDropBlock (ACML'23).
+    'energy' already contains the saturating nonlinearity E_c = 1-(1+gamma*Sigma_c)^-delta,
+    so it is not a "plain activation magnitude" control. To separate the contribution of EGPG
+    from that prior work, this pure GAP control is required.
     """
+    if score == 'gap':
+        return x.abs().mean(dim=(2, 3))
     if score == 'random':
         return torch.ones(x.shape[0], x.shape[1], device=x.device, dtype=x.dtype)
     if score == 'energy':
@@ -134,7 +140,7 @@ def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
         P = _peakedness(x, peakedness, eps)
         return E * (1.0 - P)
     raise ValueError(f"Unknown score: '{score}'. "
-                     "Choose from: egpg, energy, peak, random")
+                     "Choose from: egpg, energy, peak, random, gap")
 
 
 def drop_mask_from_scores(scores: torch.Tensor, drop_rate: float,
@@ -156,15 +162,25 @@ def drop_mask_from_scores(scores: torch.Tensor, drop_rate: float,
     Returns:
         mask: (B, C, 1, 1)  float
     """
+    return _bernoulli_keep(
+        _drop_probs_from_scores(scores, drop_rate, norm, eps))
+
+
+def _drop_probs_from_scores(scores: torch.Tensor, drop_rate: float,
+                            norm: str = 'max', eps: float = 1e-6):
+    """(B, C) scores -> (B, C) per-channel drop probabilities."""
     if norm == 'max':
         denom = scores.amax(dim=1, keepdim=True).clamp(min=eps)
-        drop_probs = drop_rate * scores / denom
-    elif norm == 'mean':
+        return drop_rate * scores / denom
+    if norm == 'mean':
         C = scores.shape[1]
         denom = scores.sum(dim=1, keepdim=True).clamp(min=eps)
-        drop_probs = (drop_rate * C * scores / denom).clamp(max=1.0)
-    else:
-        raise ValueError(f"Unknown norm: '{norm}'. Choose 'max' or 'mean'.")
+        return (drop_rate * C * scores / denom).clamp(max=1.0)
+    raise ValueError(f"Unknown norm: '{norm}'. Choose 'max' or 'mean'.")
+
+
+def _bernoulli_keep(drop_probs: torch.Tensor) -> torch.Tensor:
+    """(B, C) drop probabilities -> (B, C, 1, 1) keep mask."""
     keep = (torch.rand_like(drop_probs) > drop_probs).float()
     return keep.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
 
@@ -178,7 +194,7 @@ class DropRateMonitor:
     Mixin that accumulates the *realised* fraction of dropped units.
 
     p_base is only an upper bound on the average drop rate under 'max'
-    normalisation (Eq. 7 of the paper), so the nominal rate is not directly
+    normalisation, so the nominal rate is not directly
     comparable against unstructured dropout at the same nominal p. This
     monitor records what actually happened, at negligible cost, so every run
     can report its measured effective rate p_bar alongside p_base.
@@ -187,6 +203,73 @@ class DropRateMonitor:
         self._drop_sum = 0.0
         self._drop_batches = 0
         self.last_drop_frac = float('nan')
+
+    # -- drop-rate schedule / participation ------------------------------
+    # DropBlock (NeurIPS'18): linear ramp-up to the target rate. Strong dropout from the
+    #   start destabilises training; ramping it up improves both accuracy and robustness.
+    # FocusedDropout (2021): 'participation', applying the drop to only part of the batch.
+    #   An orthogonal axis that controls "how often" instead of "how hard".
+    def _init_schedule(self, schedule: str = 'const', participation: float = 1.0,
+                       warmup_frac: float = 0.0):
+        self.schedule = schedule
+        self.participation = float(participation)
+        # No dropping during this initial fraction of training. Guided Dropout has to learn
+        # its strength parameters and used 40/200 = 0.2. SDrop has nothing to learn, but
+        # whether intervening before early representations settle is harmful is a separate
+        # question, so it is exposed as an axis.
+        self.warmup_frac = float(warmup_frac)
+        self._progress = 0.0          # 0.0 -> 1.0, training progress
+
+    def set_progress(self, progress: float):
+        """Set training progress (0-1). Called by train.py every epoch."""
+        self._progress = float(min(max(progress, 0.0), 1.0))
+
+    def _current_rate(self) -> float:
+        base = self.drop_rate
+        # With warmup_frac=0 there must be no warm-up. Comparing with <= would return 0
+        # on the first call (progress 0) and disable even the const schedule.
+        _wu = getattr(self, 'warmup_frac', 0.0)
+        if _wu > 0.0 and self._progress <= _wu:
+            return 0.0
+        sched = getattr(self, 'schedule', 'const')
+        if sched == 'const':
+            return base
+        if sched == 'linear':
+            # DropBlock (NeurIPS'18): linear ramp-up 0 -> target
+            return base * self._progress
+        if sched == 'early':
+            # Drop only in the first half of training (no drop in the second). --warmup_frac 0.5 is its mirror (second half only).
+            return base if self._progress <= 0.5 else 0.0
+        if sched == 'gd':
+            # Guided Dropout (AAAI'19) profile. Original paper (200 epochs):
+            #   40 epochs of strength learning (no drop) -> p for 60 epochs -> 0.75p for 50 -> 0.5p for 50
+            #   with p_base=0.2 this gives 0.2 / 0.15 / 0.1.
+            # Expressed as fractions to be independent of the epoch count: 0.20 / 0.30 / 0.25 / 0.25.
+            # Opposite direction to DropBlock (decreasing). The two papers use opposite schedules,
+            # so which one is right is an empirical question.
+            t = self._progress
+            if t <= 0.20:
+                return 0.0
+            if t <= 0.50:
+                return base
+            if t <= 0.75:
+                return base * 0.75
+            return base * 0.5
+        if sched == 'gdtopk':
+            # Guided Dropout top-k profile (original paper, 200 epochs):
+            #   p 10ep / no drop 40 / 0.75p 10 / no drop 40 / 0.5p 10 / no drop 50
+            #   Deterministic selection applied continuously breaks training, hence the pauses.
+            # Fractions: 0.05 / 0.20 / 0.05 / 0.20 / 0.05 / 0.25  (the first 0.20 is warm-up)
+            t = self._progress
+            if t <= 0.20:      return 0.0          # warm-up
+            if t <= 0.25:      return base
+            if t <= 0.45:      return 0.0
+            if t <= 0.50:      return base * 0.75
+            if t <= 0.70:      return 0.0
+            if t <= 0.75:      return base * 0.5
+            return 0.0
+        raise ValueError(f"Unknown schedule: '{sched}'. "
+                         "Choose 'const', 'linear', 'early', 'gd' or 'gdtopk'.")
 
     def _record(self, mask: torch.Tensor):
         # mask is 1 = keep, 0 = drop
@@ -237,10 +320,27 @@ class SDrop(nn.Module, DropRateMonitor):
                  gamma: float = 1.0, delta: float = 1.0,
                  peakedness: str = 'max', norm: str = 'max',
                  grad_mode: str = 'off', grad_ema: float = 0.9,
+                 schedule: str = 'const', participation: float = 1.0,
+                 warmup_frac: float = 0.0,
+                 rescale: bool = False, rescale_floor: float = 0.1,
+                 rescale_mode: str = 'prob',
+                 select: str = 'bernoulli',
+                 assign: str = 'score',
                  eps: float = 1e-6):
         super().__init__()
         self.drop_rate = drop_rate
         self.score = score
+        # assign: how the computed set of probabilities is assigned to channels.
+        #   'score'   - in score order (the original SDrop)
+        #   'shuffle' - randomly permute the probability vector along the channel axis, per sample.
+        #               The set of probabilities, expected number of drops and mask entropy are unchanged;
+        #               only the link between score and channel is broken.
+        #   'reverse' - keep the set of probabilities but assign the lowest ones to the highest-scoring channels.
+        #   'cross'   - roll the probability vector along the **batch axis** (random offset>=1): sample i
+        #               receives the whole probability vector of another sample j. Channel order and budget
+        #               are unchanged; only the link to its own input is broken (cross-sample control).
+        assert assign in ('score', 'shuffle', 'reverse', 'cross'), assign
+        self.assign = assign
         self.gamma = gamma
         self.delta = delta
         self.peakedness = peakedness
@@ -249,7 +349,14 @@ class SDrop(nn.Module, DropRateMonitor):
         self.grad_ema = grad_ema
         self.eps = eps
         self._grad_mag = None          # (C,) EMA of |dL/da_c|, normalised to mean 1
+        self.rescale = bool(rescale)
+        self.rescale_floor = float(rescale_floor)   # rescale factor capped at 1/floor
+        assert rescale_mode in ('prob', 'count'), rescale_mode
+        self.rescale_mode = rescale_mode
+        assert select in ('bernoulli', 'topk'), select
+        self.select = select
         self._init_monitor()
+        self._init_schedule(schedule, participation, warmup_frac)
 
     # -- gradient capture -------------------------------------------------
     def _capture_grad(self, grad: torch.Tensor):
@@ -277,14 +384,80 @@ class SDrop(nn.Module, DropRateMonitor):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.training or self.drop_rate <= 0.0:
             return x
+        rate = self._current_rate()
+        if rate <= 0.0:
+            return x
+        # participation: decide whether to skip this batch (FocusedDropout style)
+        part = getattr(self, 'participation', 1.0)
+        if part < 1.0 and float(torch.rand(())) >= part:
+            self._record(torch.ones(1, 1, 1, 1, device=x.device))
+            return x
         scores = compute_score(x, self.score, self.gamma, self.delta,
                                self.peakedness, self.eps)          # (B, C)
         if self.grad_mode != 'off':
             scores = self._apply_grad_guidance(scores)
             if x.requires_grad:
                 x.register_hook(self._capture_grad)
-        mask = drop_mask_from_scores(scores, self.drop_rate, self.norm, self.eps)
+        if self.assign == 'cross' and x.shape[0] > 1:
+            # Batch-axis derangement: with a roll of offset>=1 nobody receives its own vector.
+            scores = scores.roll(int(torch.randint(1, x.shape[0], ())), dims=0)
+        if self.select == 'topk':
+            # Top-k as in Guided Dropout (AAAI'19): drop the k highest-scoring channels
+            # **deterministically**, instead of tilting probabilities.
+            #   The original paper found that applying this continuously breaks training and
+            #   alternated drop / no drop (10 epochs drop / 40 epochs no drop). schedule='gdtopk'
+            #   reproduces that alternation.
+            C = scores.shape[1]
+            k = int(round(C * rate))
+            if k <= 0:
+                return x
+            # Controls also apply to top-k: shuffle = the same k channels chosen
+            # at random, reverse = the k lowest-scoring channels.
+            if self.assign == 'shuffle':
+                idx = torch.rand_like(scores).topk(k, dim=1).indices
+            elif self.assign == 'reverse':
+                idx = (-scores).topk(k, dim=1).indices
+            else:
+                idx = scores.topk(k, dim=1).indices               # (B, k)
+            mask = torch.ones_like(scores).scatter_(1, idx, 0.0)
+            mask = mask.unsqueeze(-1).unsqueeze(-1)
+            self._record(mask)
+            if self.rescale:
+                return x * mask * (C / max(C - k, 1))
+            return x * mask
+        drop_probs = _drop_probs_from_scores(scores, rate, self.norm, self.eps)
+        if self.rescale and self.rescale_mode == 'prob':
+            # norm='mean' gives p_c = clamp(p*C*s_c/sum(s), max=1), so once the score
+            # distribution becomes skewed during training (exactly what the SDrop hypothesis predicts)
+            # some channel's p_c approaches 1. When such a channel occasionally survives,
+            # the 1/(1-p_c) rescale jumps to 1e6 and training collapses
+            # (observed once: train accuracy fell from 91.2% to 1.3% mid-training).
+            # Clip the probabilities before building the mask so mask and rescale always agree.
+            drop_probs = drop_probs.clamp(max=1.0 - self.rescale_floor)
+        if self.assign == 'shuffle':
+            # Permute after probability computation and capping so the set of probabilities is preserved.
+            perm = torch.rand_like(drop_probs).argsort(dim=1)
+            drop_probs = drop_probs.gather(1, perm)
+        elif self.assign == 'reverse':
+            # Scatter ascending probabilities onto channels in descending score order -> highest score gets lowest probability.
+            order = scores.argsort(dim=1, descending=True)
+            asc = drop_probs.sort(dim=1).values
+            drop_probs = torch.zeros_like(drop_probs).scatter_(1, order, asc)
+        mask = _bernoulli_keep(drop_probs)
         self._record(mask)
+        if self.rescale:
+            # inverted dropout: match train/eval expectations. All compared
+            # baselines (nn.Dropout2d, DropBlock) do this.
+            if self.rescale_mode == 'count':
+                # count-based (WCD style): correct by the number of channels actually kept.
+                # Unlike the probability-based version it needs no clamp, so the budget does not
+                # leak at high drop rates (prob mode is off by 0.12 in effective rate at p>=0.5).
+                C = mask.shape[1]
+                kept = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+                return x * mask * (C / kept)
+            # probability-based: divide by the per-channel keep probability. Exact for p<=0.3.
+            keep_p = 1.0 - drop_probs          # guaranteed >= rescale_floor
+            return x * mask / keep_p.unsqueeze(-1).unsqueeze(-1)
         return x * mask
 
     def extra_repr(self) -> str:
@@ -293,6 +466,12 @@ class SDrop(nn.Module, DropRateMonitor):
              f"peakedness={self.peakedness}, norm={self.norm}")
         if self.grad_mode != 'off':
             s += f", grad_mode={self.grad_mode}, grad_ema={self.grad_ema}"
+        if getattr(self, 'schedule', 'const') != 'const':
+            s += f", schedule={self.schedule}"
+        if getattr(self, 'participation', 1.0) < 1.0:
+            s += f", participation={self.participation}"
+        if getattr(self, 'assign', 'score') != 'score':
+            s += f", assign={self.assign}"
         return s
 
 
@@ -443,7 +622,9 @@ class SGridLC(nn.Module, DropRateMonitor):
         self.peakedness = peakedness
         self.norm = norm
         self.eps = eps
+        self.rescale = False
         self._init_monitor()
+        self._init_schedule('const', 1.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.training or self.drop_rate <= 0.0:
@@ -497,6 +678,15 @@ _SCORE_OF_METHOD = {
     'sdrop_energy': 'energy',
     'sdrop_peak':   'peak',     # ablation: peakedness only
     'sdrop_random': 'random',   # ablation: uniform score control
+    'sdrop_gap':    'gap',      # ablation: pure GAP score (channel version of WCD/ProbDropBlock)
+    'sdrop_shuffle': 'egpg',    # control: permute the EGPG probability set along the channel axis
+    'sdrop_reverse': 'egpg',    # control: assign EGPG probabilities in reverse score order
+    'sdrop_cross':   'energy',  # control: roll energy probability vectors along the batch axis (receive another sample's)
+}
+_ASSIGN_OF_METHOD = {
+    'sdrop_shuffle': 'shuffle',
+    'sdrop_reverse': 'reverse',
+    'sdrop_cross':   'cross',
 }
 
 
@@ -504,7 +694,10 @@ def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
                 num_classes: int = 100,
                 gamma: float = 1.0, delta: float = 1.0,
                 peakedness: str = 'max', norm: str = 'max',
-                grad_mode: str = 'off') -> nn.Module:
+                grad_mode: str = 'off',
+                schedule: str = 'const', participation: float = 1.0,
+                rescale: bool = False, rescale_mode: str = 'prob',
+                select: str = 'bernoulli', warmup_frac: float = 0.0) -> nn.Module:
     """
     method: 'none' | 'dropout' | 'sdrop' | 'sdrop_energy'
           | 'sdrop_peak' | 'sdrop_random' | 'sdrop_class' | 'sgridlc'
@@ -523,13 +716,25 @@ def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
         return nn.Dropout(p=drop_rate)
     if method == 'sdrop_class':
         return SDropClassAware(drop_rate, num_classes=num_classes, gamma=gamma,
+                               delta=delta,
                                peakedness=peakedness, norm=norm,
-                               grad_mode=grad_mode)
+                               grad_mode=grad_mode,
+                               schedule=schedule, participation=participation,
+                               rescale=rescale)
     if method in _SCORE_OF_METHOD:
         return SDrop(drop_rate, score=_SCORE_OF_METHOD[method], gamma=gamma,
                      delta=delta, peakedness=peakedness, norm=norm,
-                     grad_mode=grad_mode)
+                     grad_mode=grad_mode,
+                     schedule=schedule, participation=participation,
+                     rescale=rescale, rescale_mode=rescale_mode,
+                     select=select, warmup_frac=warmup_frac,
+                     assign=_ASSIGN_OF_METHOD.get(method, 'score'))
     if method == 'sgridlc':
+        if (schedule != 'const' or participation < 1.0 or rescale
+                or select != 'bernoulli' or warmup_frac > 0.0):
+            # Silently ignoring these would let run_id append tags, creating a phantom ablation.
+            raise ValueError("sgridlc does not yet support schedule/participation/rescale/select/"
+                             "warmup.")
         return SGridLC(drop_rate, grid_size, score='egpg', gamma=gamma,
                        delta=delta, peakedness=peakedness, norm=norm)
     raise ValueError(f"Unknown SDrop method: '{method}'. Choose from: none, dropout "
@@ -553,7 +758,7 @@ def collect_drop_rates(model: nn.Module, reset: bool = True) -> dict:
             print("  effective drop rate: " +
                   ", ".join(f"{k}={v:.4f}" for k, v in rates.items()))
 
-    Report the resulting p_bar next to the nominal p_base in the paper: under
+    Report the resulting p_bar next to the nominal p_base: under
     'max' normalisation p_bar < p_base, so nominal-rate comparisons against
     unstructured dropout are not like-for-like.
     """

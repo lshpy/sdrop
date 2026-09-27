@@ -12,11 +12,10 @@ as the analogue of a CNN feature channel and compute a head-level EGPG score:
 
 High-score heads are stochastically dropped during training (drop = mask the
 head's contribution to the attention output by zeroing its output projection
-slice). The selection mirrors the channel-level Equation (5) of the paper.
+slice). The selection mirrors the channel-level SDrop rule.
 
-Reference (Appendix C of the Springer ML extended version):
-  Lee, S. & Longo, L. "Suppressive Dropout: A Bio-Inspired and Explainable
-  Channel-Selective Regularization Framework..." (in preparation, 2026)
+Reference:
+  Lee, S. "Suppressive Dropout" (xAI 2026 Late-Breaking Work / Demo).
 """
 
 from __future__ import annotations
@@ -79,15 +78,90 @@ def head_egpg(A: torch.Tensor, gamma: float = 1.0, delta: float = 1.0,
 
 
 def head_drop_mask(scores: torch.Tensor, drop_rate: float,
-                   eps: float = 1e-6) -> torch.Tensor:
+                   norm: str = 'max', eps: float = 1e-6) -> torch.Tensor:
     """
-    p_drop,h = drop_rate * s_h / max_h s_h
+    norm='max'  : p_drop,h = drop_rate * s_h / max_h s_h            (legacy)
+    norm='mean' : p_drop,h = min(1, drop_rate * H * s_h / sum_h s_h)
+
+    With 'max' only the top-scoring head is dropped at exactly drop_rate, so the effective rate is
+    drop_rate * mean(s)/max(s) <= drop_rate. The same convention as drop_mask_from_scores() on the CNN
+    side is needed for a comparison with baselines at nominal p.
+
     mask[b, h] = Bernoulli(1 - p_drop,h)   (1 = keep, 0 = drop)
     """
-    s_max = scores.amax(dim=1, keepdim=True).clamp_min(eps)
-    p = drop_rate * (scores / s_max)
+    if norm == 'max':
+        s_max = scores.amax(dim=1, keepdim=True).clamp_min(eps)
+        p = drop_rate * (scores / s_max)
+    elif norm == 'mean':
+        H = scores.shape[1]
+        s_sum = scores.sum(dim=1, keepdim=True).clamp_min(eps)
+        p = (drop_rate * H * scores / s_sum).clamp(max=1.0)
+    else:
+        raise ValueError(f"Unknown norm: '{norm}'. Choose 'max' or 'mean'.")
     keep_prob = (1.0 - p).clamp(0.0, 1.0)
     return torch.bernoulli(keep_prob)              # (B, H)
+
+
+
+
+# ---------------------------------------------------------------------------
+# Token / Key level scoring  (3 heads is far too coarse a resolution)
+# ---------------------------------------------------------------------------
+
+def key_egpg(attn_logits: torch.Tensor, gamma: float = 100.0,
+             delta: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Key (= token) level EGPG score.  attn_logits: (B, H, N, N)  ->  (B, N)
+
+    Head-level dropping has only num_heads (=3) candidates, i.e. only 2^3 = 8 possible
+    masks, leaving practically no room for a score function to differ from random selection.
+    At key level there are N (=65) candidates, more than 20x the resolution.
+    This is the same place where DropKey (CVPR'23) drops keys before the softmax.
+
+      E_j = 1 - (1 + gamma * Sigma_j)^-delta,  Sigma_j = mean_{b,h,i} logits[.,.,i,j]^2
+      P_j = max_i |a_ij| / sum_i |a_ij|        (concentration along the query axis)
+      s_j = E_j * (1 - P_j)
+    """
+    a = attn_logits.mean(dim=1)                      # (B, N, N)  mean over heads
+    mean_sq = a.pow(2).mean(dim=1)                   # (B, N)     mean over queries
+    E = 1.0 - (1.0 + gamma * mean_sq).pow(-delta)
+    absa = a.abs()
+    P = absa.amax(dim=1) / (absa.sum(dim=1) + eps)   # (B, N)
+    return E * (1.0 - P)
+
+
+def token_keep_prob(scores: torch.Tensor, drop_rate: float,
+                    norm: str = 'mean', eps: float = 1e-6) -> torch.Tensor:
+    """Per-channel keep probability with the same convention as token_drop_mask (for rescaling)."""
+    if norm == 'max':
+        p = drop_rate * scores / scores.amax(dim=1, keepdim=True).clamp_min(eps)
+    else:
+        N = scores.shape[1]
+        p = (drop_rate * N * scores /
+             scores.sum(dim=1, keepdim=True).clamp_min(eps)).clamp(max=1.0)
+    return (1.0 - p).clamp_min(eps)
+
+
+def token_drop_mask(scores: torch.Tensor, drop_rate: float,
+                    norm: str = 'mean', keep_cls: bool = True,
+                    eps: float = 1e-6) -> torch.Tensor:
+    """
+    (B, N) scores -> (B, N) keep mask. The cls token (index 0) is never dropped:
+    the classification head reads only that token, so dropping it would make that sample's loss meaningless.
+    """
+    if norm == 'max':
+        denom = scores.amax(dim=1, keepdim=True).clamp_min(eps)
+        p = drop_rate * scores / denom
+    elif norm == 'mean':
+        N = scores.shape[1]
+        denom = scores.sum(dim=1, keepdim=True).clamp_min(eps)
+        p = (drop_rate * N * scores / denom).clamp(max=1.0)
+    else:
+        raise ValueError(f"Unknown norm: '{norm}'. Choose 'max' or 'mean'.")
+    keep = torch.bernoulli((1.0 - p).clamp(0.0, 1.0))
+    if keep_cls:
+        keep[:, 0] = 1.0
+    return keep
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +180,8 @@ class SDropMultiheadSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 6, qkv_bias: bool = True,
                  attn_drop: float = 0.0, proj_drop: float = 0.0,
                  sdrop_rate: float = 0.0, gamma: float = 1.0, delta: float = 1.0,
-                 score_input: str = "pre"):
+                 score_input: str = "pre", norm: str = "max",
+                 unit: str = "head"):
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
         self.dim = dim
@@ -125,6 +200,10 @@ class SDropMultiheadSelfAttention(nn.Module):
         self.delta = float(delta)
         assert score_input in ("pre", "post"), score_input
         self.score_input = score_input
+        assert norm in ("max", "mean"), norm
+        self.norm_mode = norm
+        assert unit in ("head", "key", "token"), unit
+        self.unit = unit
 
         # Diagnostics: store the latest score / mask for visualization
         self.last_scores: Optional[torch.Tensor] = None
@@ -140,14 +219,45 @@ class SDropMultiheadSelfAttention(nn.Module):
         attn = attn_logits.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        # ---- SDrop head selection (training only) ----
-        if self.training and self.sdrop_rate > 0.0:
+        # ---- SDrop selection (training only) ----
+        if self.training and self.sdrop_rate > 0.0 and self.unit == "key":
+            # DropKey-style: mask keys before the softmax. A dropped key receives no
+            # attention from any query, so the intervention changes the attention distribution
+            # itself, which acts much more strongly than multiplying the output by a mask.
+            with torch.no_grad():
+                _src = attn_logits if self.score_input == "pre" else attn
+                scores = key_egpg(_src, self.gamma, self.delta)          # (B, N)
+                mask = token_drop_mask(scores, self.sdrop_rate, self.norm_mode)
+                self.last_scores = scores.detach()
+                self.last_mask = mask.detach()
+            neg = torch.finfo(attn_logits.dtype).min
+            masked_logits = attn_logits.masked_fill(
+                (mask == 0).unsqueeze(1).unsqueeze(1), neg)
+            attn = masked_logits.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            out = attn @ v
+        elif self.training and self.sdrop_rate > 0.0 and self.unit == "token":
+            # Token (= output position) level drop. Zero whole token rows of the attention output.
+            with torch.no_grad():
+                _src = attn_logits if self.score_input == "pre" else attn
+                scores = key_egpg(_src, self.gamma, self.delta)          # (B, N)
+                mask = token_drop_mask(scores, self.sdrop_rate, self.norm_mode)
+                self.last_scores = scores.detach()
+                self.last_mask = mask.detach()
+            out = attn @ v                              # (B, H, N, head_dim)
+            out = out * mask.unsqueeze(1).unsqueeze(-1)
+            # cls (index 0) is never dropped, so it must not be rescaled either.
+            # Divide by the expected per-token keep probability, not the realised batch ratio.
+            keep_p = token_keep_prob(scores, self.sdrop_rate, self.norm_mode)
+            keep_p[:, 0] = 1.0
+            out = out / keep_p.unsqueeze(1).unsqueeze(-1)
+        elif self.training and self.sdrop_rate > 0.0:
             with torch.no_grad():
                 # Score from pre-softmax logits — preserves head-magnitude
                 # differences that vanish after softmax.
                 _src = attn_logits if self.score_input == "pre" else attn
                 scores = head_egpg(_src, self.gamma, self.delta)   # (B, H)
-                mask = head_drop_mask(scores, self.sdrop_rate)             # (B, H)
+                mask = head_drop_mask(scores, self.sdrop_rate, self.norm_mode)  # (B, H)
                 self.last_scores = scores.detach()
                 self.last_mask = mask.detach()
             # apply per-head mask to value-attention output
@@ -206,14 +316,15 @@ class Block(nn.Module):
     def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0,
                  qkv_bias: bool = True, drop: float = 0.0, attn_drop: float = 0.0,
                  sdrop_rate: float = 0.0, gamma: float = 1.0, delta: float = 1.0,
-                 score_input: str = "pre"):
+                 score_input: str = "pre", norm: str = "max",
+                 unit: str = "head"):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = SDropMultiheadSelfAttention(
             dim=dim, num_heads=num_heads, qkv_bias=qkv_bias,
             attn_drop=attn_drop, proj_drop=drop,
             sdrop_rate=sdrop_rate, gamma=gamma, delta=delta,
-            score_input=score_input,
+            score_input=score_input, norm=norm, unit=unit,
         )
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, hidden_dim=int(dim * mlp_ratio), drop=drop)
@@ -238,7 +349,8 @@ class SDropViT(nn.Module):
                  num_heads: int = 3, mlp_ratio: float = 4.0, qkv_bias: bool = True,
                  drop_rate: float = 0.0, attn_drop_rate: float = 0.0,
                  sdrop_rate: float = 0.0, sdrop_layers=("L3", "L4"),
-                 score_input: str = "pre",
+                 score_input: str = "pre", norm: str = "max",
+                 unit: str = "head",
                  gamma: float = 1.0, delta: float = 1.0):
         super().__init__()
         self.num_classes = num_classes
@@ -251,19 +363,32 @@ class SDropViT(nn.Module):
 
         # Decide which block indices receive SDrop.
         # We treat the final block as "L4" and the penultimate as "L3", matching
-        # the paper's convention.
+        # the CNN convention.
+        # "all" means every block. Previously sdrop_vit_full passed ("L1","L2","L3","L4")
+        # but only L3/L4 were interpreted here, so it acted on the last two blocks only, i.e. the
+        # full ablation behaved exactly like sdrop_vit.
         sdrop_indices = set()
-        if "L4" in sdrop_layers:
-            sdrop_indices.add(depth - 1)
-        if "L3" in sdrop_layers:
-            sdrop_indices.add(depth - 2)
+        if "all" in sdrop_layers:
+            sdrop_indices = set(range(depth))
+        else:
+            unknown = [l for l in sdrop_layers if l not in ("L3", "L4")]
+            if unknown:
+                # Silently ignoring this would save a run with SDrop entirely disabled under the sdrop_vit name.
+                raise ValueError(
+                    f"ViT supports only L3 (= second-to-last block) / L4 (= last block) "
+                    f"({unknown} requested).")
+            if "L4" in sdrop_layers:
+                sdrop_indices.add(depth - 1)
+            if "L3" in sdrop_layers:
+                sdrop_indices.add(depth - 2)
 
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, drop=drop_rate, attn_drop=attn_drop_rate,
                 sdrop_rate=sdrop_rate if i in sdrop_indices else 0.0,
-                gamma=gamma, delta=delta, score_input=score_input,
+                gamma=gamma, delta=delta, score_input=score_input, norm=norm,
+                unit=unit,
             )
             for i in range(depth)
         ])
@@ -303,7 +428,8 @@ class SDropViT(nn.Module):
 def build_sdrop_vit(num_classes: int = 100, img_size: int = 32,
                     method: str = "sdrop_vit", drop_rate: float = 0.1,
                     layers=("L3", "L4"), gamma: float = 100.0, delta: float = 1.0,
-                    score_input: str = "pre"):
+                    score_input: str = "pre", norm: str = "max",
+                 unit: str = "head"):
     """gamma defaulted to 100 to amplify per-head differences in pre-softmax
     attention logits, which are typically two orders of magnitude smaller
     than CNN feature activations."""
@@ -323,7 +449,10 @@ def build_sdrop_vit(num_classes: int = 100, img_size: int = 32,
         sdrop_layers = tuple(layers) if layers else ("L3", "L4")
     elif method == "sdrop_vit_full":
         sdrop_rate = drop_rate
-        sdrop_layers = ("L1", "L2", "L3", "L4")  # interpreted by index trick below
+        if layers:
+            raise ValueError("sdrop_vit_full applies to every block and does not take --layers "
+                             "(run_id would append a tag, creating a phantom ablation).")
+        sdrop_layers = ("all",)   # every block (the earlier implementation only hit the last two)
     else:
         raise ValueError(f"unknown ViT method '{method}'")
 
@@ -331,7 +460,8 @@ def build_sdrop_vit(num_classes: int = 100, img_size: int = 32,
         img_size=img_size, patch_size=4, in_chans=3, num_classes=num_classes,
         embed_dim=192, depth=12, num_heads=3, mlp_ratio=4.0,
         sdrop_rate=sdrop_rate, sdrop_layers=sdrop_layers,
-        gamma=gamma, delta=delta, score_input=score_input,
+        gamma=gamma, delta=delta, score_input=score_input, norm=norm,
+        unit=unit,
     )
 
 

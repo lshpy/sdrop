@@ -1,5 +1,5 @@
 """
-Comparison baselines for the Springer ML extended version.
+Comparison baselines for SDrop.
 
 Three modules implementing well-known regularization / channel-attention
 methods, designed to be drop-in replacements for the SDrop module
@@ -45,7 +45,7 @@ class DropBlock2D(nn.Module):
         if not self.training or self.drop_prob <= 0.0:
             return x
         B, C, H, W = x.shape
-        # gamma normalisation as in the paper:
+        # gamma normalisation as in the DropBlock paper:
         #   gamma = drop_prob / block_size^2 * H*W / ((H - block_size + 1)*(W - block_size + 1))
         denom = max(1, (H - self.block_size + 1) * (W - self.block_size + 1))
         gamma = self.drop_prob * H * W / (self.block_size ** 2 * denom)
@@ -179,27 +179,243 @@ class _LazyCBAMWrapper(nn.Module):
 # Factory used by build_model
 # ---------------------------------------------------------------------------
 
+class GuidedDropout(nn.Module):
+    """
+    Guided Dropout (Keshari, Singh & Vatsa, AAAI 2019; arXiv:1812.03965).
+
+    Each channel (feature map) is multiplied by a **learned strength t_c**; during training
+    channels with large t are dropped so that channels with small t can grow.
+        y_c = t_c * x_c
+        'topk' : deterministically drop the k=round(C*p) channels with the largest t (GD-top-k)
+        'dr'   : randomly drop k channels inside the active region (top active_frac of t) (GD-DR)
+    t is a global learned parameter: it does not vary per sample and ignores spatial structure.
+    These are exactly the two points where it differs from SDrop.
+
+    Original schedule (200 epochs): 40 epochs of strength learning (no drop), then alternating drop / no drop.
+    The 'gdtopk' profile of sdrop.DropRateMonitor reproduces that alternation as fractions.
+    Default schedule='gdtopk'. With 'const' it is applied continuously at the same budget as SDrop.
+
+    SDrop with `--select topk --schedule gdtopk` is not this reproduction, since its score is EGPG.
+    """
+    def __init__(self, channels: int, drop_rate: float = 0.1, mode: str = 'topk',
+                 schedule: str = 'gdtopk', active_frac: float = 0.5,
+                 warmup_frac: float = 0.0, participation: float = 1.0):
+        super().__init__()
+        assert mode in ('topk', 'dr'), mode
+        self.drop_rate = float(drop_rate)
+        self.mode = mode
+        self.active_frac = float(active_frac)
+        # Initialised to 1 so that attaching it to a pretrained backbone does not change the initial forward pass.
+        self.t = nn.Parameter(torch.ones(channels))
+        from sdrop import DropRateMonitor
+        self._mon = DropRateMonitor()
+        self._mon._init_monitor()
+        self._mon._init_schedule(schedule, participation, warmup_frac)
+        self._mon.drop_rate = self.drop_rate
+        self.schedule = schedule
+        self.last_drop_frac = float('nan')
+
+    def set_progress(self, progress: float):
+        self._mon.set_progress(progress)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        C = x.shape[1]
+        y = x * self.t.view(1, C, 1, 1)
+        if not self.training or self.drop_rate <= 0.0:
+            return y
+        rate = self._mon._current_rate()
+        k = int(round(C * rate))
+        if rate <= 0.0 or k <= 0:
+            self.last_drop_frac = 0.0
+            return y
+        t = self.t.detach()
+        if self.mode == 'topk':
+            idx = t.topk(k).indices                                   # (k,)
+            mask = torch.ones(C, device=x.device, dtype=y.dtype)
+            mask[idx] = 0.0
+            mask = mask.view(1, C, 1, 1).expand(x.shape[0], C, 1, 1)
+        else:
+            n_act = max(k, int(round(C * self.active_frac)))
+            act = t.topk(n_act).indices                                # active region
+            # per sample, choose k at random inside the active region
+            r = torch.rand(x.shape[0], n_act, device=x.device)
+            pick = r.topk(k, dim=1).indices                            # (B, k)
+            chosen = act[pick]                                         # (B, k)
+            mask = torch.ones(x.shape[0], C, device=x.device, dtype=y.dtype)
+            mask.scatter_(1, chosen, 0.0)
+            mask = mask.view(x.shape[0], C, 1, 1)
+        self.last_drop_frac = float(1.0 - mask.mean())
+        return y * mask
+
+    def extra_repr(self) -> str:
+        return (f"C={self.t.numel()}, drop_rate={self.drop_rate}, mode={self.mode}, "
+                f"schedule={self.schedule}, active_frac={self.active_frac}")
+
+
 def build_baseline(method: str, drop_rate: float = 0.1,
-                   block_size: int = 3, reduction: int = 16) -> nn.Module:
+                   block_size: int = 3, reduction: int = 16,
+                   channels: int = None, participation: float = 0.1,
+                   schedule: str = 'const', warmup_frac: float = 0.0) -> nn.Module:
     """
-    Build one of {'dropblock', 'senet', 'cbam'} as a single drop-in module
-    that takes / returns a (B, C, H, W) tensor.
+    Build one of {'dropblock', 'senet', 'cbam', 'wcd', 'focuseddrop',
+    'guided_topk', 'guided_dr'} as a single drop-in module that takes /
+    returns a (B, C, H, W) tensor.
     """
+    if method in ('guided_topk', 'guided_dr'):
+        if channels is None:
+            raise ValueError("guided dropout requires the channels argument (strength t).")
+        return GuidedDropout(channels, drop_rate=drop_rate,
+                             mode='topk' if method == 'guided_topk' else 'dr',
+                             schedule=schedule, warmup_frac=warmup_frac)
     if method == 'dropblock':
         return DropBlock2D(drop_prob=drop_rate, block_size=block_size)
+    # Lazy wrappers create their parameters on the first forward, but the optimizer is
+    # built before that -> SE/CBAM weights would stay at their random init throughout training.
+    # Create them immediately when the channel count is known; otherwise fall back to lazy with a warning.
     if method == 'senet':
-        return _LazySEWrapper(reduction=reduction)
+        if channels is None:
+            raise ValueError("senet requires the channels argument: with lazy creation "
+                             "the optimizer does not see the parameters and they are never trained.")
+        return SEBlock(channels, reduction=reduction)
     if method == 'cbam':
-        return _LazyCBAMWrapper(reduction=reduction)
+        if channels is None:
+            raise ValueError("cbam requires the channels argument: with lazy creation "
+                             "the optimizer does not see the parameters and they are never trained.")
+        return CBAM(channels, reduction=reduction)
+    if method == 'wcd':
+        return WeightedChannelDropout(drop_rate=drop_rate)
+    if method == 'focuseddrop':
+        return FocusedDropout(drop_rate=drop_rate, participation=participation)
     raise ValueError(f"unknown baseline method '{method}'")
+
+
+
+# ---------------------------------------------------------------------------
+# Weighted Channel Dropout  (Hou & Wang, AAAI 2019)
+# ---------------------------------------------------------------------------
+
+class WeightedChannelDropout(nn.Module):
+    """
+    The closest prior work to SDrop. Channels are ranked by their mean activation (GAP)
+    and *kept* with probability proportional to it (channels with larger activation survive).
+
+        score_c = GAP(x)_c
+        p_keep,c = score_c / max_c(score_c)
+
+    Differences from SDrop:
+      1) Opposite direction. WCD *keeps* strong channels, SDrop *drops* them.
+      2) WCD's signal is the mean activation itself, while SDrop applies the saturating nonlinearity
+         E_c = 1-(1+gamma*Sigma_c)^-delta and multiplies by the spatial concentration term (1-P_c).
+
+    Args:
+        drop_rate: overall strength. p_keep is scaled down by (1-drop_rate) so that the
+                   effective drop rate matches the nominal one.
+    """
+
+    def __init__(self, drop_rate: float = 0.1, eps: float = 1e-6):
+        super().__init__()
+        self.drop_rate = float(drop_rate)
+        self.eps = eps
+        self.last_drop_frac = float('nan')
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_rate <= 0.0:
+            return x
+        score = x.mean(dim=(2, 3))                                   # (B, C)  GAP
+        score = score - score.amin(dim=1, keepdim=True)              # correct for negative activations
+        rng = score.amax(dim=1, keepdim=True)
+        # If all channels have the same GAP (dead layer, constant input), score is all 0,
+        # giving p_keep=0 -> every channel dropped (effective rate 1.0). That silently triples
+        # the strength, so fall back to uniform Bernoulli in that case.
+        degenerate = (rng <= self.eps)
+        denom = rng.clamp_min(self.eps)
+        p_keep = torch.where(degenerate,
+                             torch.full_like(score, 1.0 - self.drop_rate),
+                             score / denom)                          # (B, C) in [0, 1]
+        # Scale so that the mean keep rate is (1 - drop_rate).
+        # Simply multiplying and clamping to (0,1) cuts off mass above 1 and makes the mean lower
+        # than the target (nominal 0.1 -> effective 0.20). Solve for the factor by bisection so that
+        # the mean after clamping hits the target.
+        target = 1.0 - self.drop_rate
+        lo = torch.zeros(score.shape[0], 1, device=x.device, dtype=score.dtype)
+        hi = torch.full_like(lo, 1.0)
+        cur = p_keep.mean(dim=1, keepdim=True).clamp_min(self.eps)
+        hi = torch.maximum(hi, target / cur * 2.0)
+        for _ in range(30):                       # 30 iterations converge to double precision
+            mid = 0.5 * (lo + hi)
+            m = (p_keep * mid).clamp(0.0, 1.0).mean(dim=1, keepdim=True)
+            too_small = (m < target)
+            lo = torch.where(too_small, mid, lo)
+            hi = torch.where(too_small, hi, mid)
+        scaled = (p_keep * (0.5 * (lo + hi))).clamp(0.0, 1.0)
+        # Samples that cannot reach the target keep rate (most channels dead) fall back to uniform.
+        reached = scaled.mean(dim=1, keepdim=True) >= target - 1e-3
+        p_keep = torch.where(reached | degenerate, scaled,
+                             torch.full_like(scaled, target))
+        with torch.no_grad():           # do not hold on to the score computation graph
+            mask = torch.bernoulli(p_keep.detach()).unsqueeze(-1).unsqueeze(-1)
+        self.last_drop_frac = float((1.0 - mask).mean())
+        return x * mask
+
+    def extra_repr(self) -> str:
+        return f"drop_rate={self.drop_rate}"
+
+
+# ---------------------------------------------------------------------------
+# FocusedDropout  (Liu et al., 2021)
+# ---------------------------------------------------------------------------
+
+class FocusedDropout(nn.Module):
+    """
+    A control in the opposite direction to SDrop. The channel with the largest activation is the
+    'reference channel'; only the *spatial positions* with high activation in it are kept, and the
+    other positions are discarded in all channels ("focus on the target").
+
+    Key device of the original paper: **apply it to only part of the batches** (participation, default 10%).
+    An orthogonal axis that controls "how often" rather than "how hard".
+
+    Args:
+        drop_rate     : keep the top (1-drop_rate) fraction of positions of the reference channel
+        participation : apply to a batch only with this probability (0.1 in the original paper)
+    """
+
+    def __init__(self, drop_rate: float = 0.1, participation: float = 0.1):
+        super().__init__()
+        self.drop_rate = float(drop_rate)
+        self.participation = float(participation)
+        self.last_drop_frac = float('nan')
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_rate <= 0.0:
+            return x
+        if float(torch.rand(())) >= self.participation:
+            self.last_drop_frac = 0.0
+            return x
+        B, C, H, W = x.shape
+        # reference channel = the channel with the largest per-channel max activation
+        ref_idx = x.amax(dim=(2, 3)).argmax(dim=1)                   # (B,)
+        ref = x[torch.arange(B, device=x.device), ref_idx]           # (B, H, W)
+        flat = ref.reshape(B, -1)
+        k = max(1, int(round(H * W * (1.0 - self.drop_rate))))
+        # A threshold comparison (`>=`) fails on post-ReLU input: 50-80% of the values are exactly 0,
+        # so thresh==0, every position passes and it becomes a complete no-op.
+        # Build the mask directly from topk indices so exactly k positions are always kept.
+        idx = flat.topk(k, dim=1).indices                            # (B, k)
+        keep = torch.zeros_like(flat).scatter_(1, idx, 1.0)
+        keep = keep.view(B, 1, H, W)
+        self.last_drop_frac = float(1.0 - keep.mean())
+        return x * keep
+
+    def extra_repr(self) -> str:
+        return f"drop_rate={self.drop_rate}, participation={self.participation}"
 
 
 if __name__ == "__main__":
     torch.manual_seed(0)
-    x = torch.randn(2, 256, 8, 8)
-    for m in ['dropblock', 'senet', 'cbam']:
+    x = torch.randn(8, 256, 8, 8).abs()
+    for m in ['dropblock', 'senet', 'cbam', 'wcd', 'focuseddrop']:
         block = build_baseline(m, drop_rate=0.2)
         block.train()
         y = block(x)
-        print(f"{m:10s} -> output shape {tuple(y.shape)}, "
-              f"diff norm {(y - x).norm().item():.3f}")
+        print(f"{m:12s} -> {tuple(y.shape)}  drop_frac="
+              f"{getattr(block, 'last_drop_frac', float('nan')):.4f}")

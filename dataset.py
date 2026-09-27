@@ -36,6 +36,7 @@ Download links (fill in later)
 """
 
 import os
+import io
 from pathlib import Path
 import shutil
 
@@ -128,7 +129,7 @@ def cub200_transforms():
     return train_tf, val_tf
 
 
-# 추가적인 데이터셋 사용 가능 
+# Additional datasets can be added below.
 
 # ---------------------------------------------------------------------------
 # CIFAR-100
@@ -394,12 +395,27 @@ def reformat_tinyimagenet_val(data_root: str = './data'):
         if src.exists() and not dst.exists():
             shutil.move(str(src), str(dst))
 
+    # If an empty images/ folder remains, ImageFolder picks it up as a 201st class and all
+    # val labels shift by +1 (no error, accuracy just drops to 0).
+    if img_dir.exists() and not any(img_dir.iterdir()):
+        img_dir.rmdir()
+    elif img_dir.exists():
+        shutil.rmtree(img_dir)
     print(f"[INFO] TinyImageNet val reformatted: {val_dir}")
 
 
 def get_tinyimagenet(data_root: str = './data', batch_size: int = 128,
                      num_workers: int = 4):
     root = Path(data_root) / 'tiny-imagenet-200'
+    # If val/ is flat, ImageFolder builds a 1-class set. Restructure it automatically.
+    _val = root / 'val'
+    _ncls = len([d for d in _val.iterdir() if d.is_dir()]) if _val.exists() else 0
+    if (_val / 'images').exists() or _ncls != 200:
+        reformat_tinyimagenet_val(data_root)
+        _ncls = len([d for d in _val.iterdir() if d.is_dir()])
+        if _ncls != 200:
+            raise RuntimeError(
+                f"TinyImageNet val restructuring failed: {_ncls} class directories (expected 200)")
     train_tf, val_tf = tinyimagenet_transforms()
     train_ds = datasets.ImageFolder(root / 'train', transform=train_tf)
     val_ds   = datasets.ImageFolder(root / 'val',   transform=val_tf)
@@ -460,6 +476,10 @@ class CUB200Dataset(Dataset):
                 label = id2label[img_id]
                 self.samples.append((str(path), label))
 
+    @property
+    def targets(self):
+        return [lab for _, lab in self.samples]
+
     def __len__(self):
         return len(self.samples)
 
@@ -495,8 +515,254 @@ def get_cub200(data_root: str = './data', batch_size: int = 64,
 
 
 # ---------------------------------------------------------------------------
+# Waterbirds (Sagawa et al., 2020) - subpopulation shift benchmark
+# ---------------------------------------------------------------------------
+# CUB birds composited on Places backgrounds (land/water). In training, label (landbird/waterbird)
+# and place are 95% correlated; at test time they are independent. The standard metric is the
+# worst-group accuracy over minority groups (waterbird+land, landbird+water). Uses the HF `grodino/waterbirds` parquet.
+#   data/waterbirds/{train,validation,test}-00000-of-00001.parquet
+# There is an official validation split: checkpoints are selected on validation, final evaluation on test.
+
+class WaterbirdsDataset(Dataset):
+    """Loads a whole parquet file into memory (~200MB). Images are stored as JPEG bytes
+    and decoded in __getitem__. `places` enables group evaluation."""
+    def __init__(self, parquet_path, transform=None):
+        import pyarrow.parquet as pq
+        t = pq.read_table(parquet_path, columns=['image', 'label', 'place'])
+        self._bytes = [d['bytes'] for d in t.column('image').to_pylist()]
+        self.targets = t.column('label').to_pylist()
+        self.places = t.column('place').to_pylist()
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.targets)
+
+    def __getitem__(self, i):
+        img = Image.open(io.BytesIO(self._bytes[i])).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.targets[i]
+
+
+def waterbirds_transforms():
+    # Group-DRO/JTT/DFR convention: no augmentation, Resize(256) -> CenterCrop(224).
+    tf = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    ])
+    return tf, tf
+
+
+def get_waterbirds(data_root: str = './data', batch_size: int = 64,
+                   num_workers: int = 4):
+    """Returns (train_loader, val_loader, test_loader)."""
+    root = Path(data_root) / 'waterbirds'
+    files = {s: root / f'{s}-00000-of-00001.parquet' for s in ('train', 'validation', 'test')}
+    missing = [str(p) for p in files.values() if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Waterbirds parquet not found: " + ", ".join(missing) + "\n"
+            "Get it with: huggingface_hub.snapshot_download('grodino/waterbirds', repo_type='dataset', "
+            "allow_patterns='data/*', local_dir=...) and move the files in data/ to data/waterbirds/.")
+    train_tf, val_tf = waterbirds_transforms()
+    tr = WaterbirdsDataset(files['train'], train_tf)
+    va = WaterbirdsDataset(files['validation'], val_tf)
+    te = WaterbirdsDataset(files['test'], val_tf)
+    mk = lambda ds, sh: DataLoader(ds, batch_size=batch_size, shuffle=sh,
+                                   num_workers=num_workers, pin_memory=_pin_memory())
+    return mk(tr, True), mk(va, False), mk(te, False)
+
+
+# ---------------------------------------------------------------------------
+# CelebA (Blond_Hair x Male) - the second standard subpopulation shift benchmark
+# ---------------------------------------------------------------------------
+# label = Blond_Hair, spurious = Male. Minority group = blond males. HF `tpremoli/CelebA-attrs`
+# parquet (official train/validation/test split, 40 attribute columns) in data/celeba/*.parquet.
+# Convention (Sagawa'20): CenterCrop(178) -> Resize(224), no augmentation.
+
+class CelebADataset(Dataset):
+    def __init__(self, parquet_paths, transform=None, label='Blond_Hair', spurious='Male'):
+        import pyarrow.parquet as pq
+        tabs=[pq.read_table(p, columns=['image', label, spurious]) for p in parquet_paths]
+        self._bytes=[d['bytes'] for t in tabs for d in t.column('image').to_pylist()]
+        self.targets=[int(v > 0) for t in tabs for v in t.column(label).to_pylist()]
+        self.places =[int(v > 0) for t in tabs for v in t.column(spurious).to_pylist()]
+        self.transform=transform
+    def __len__(self): return len(self.targets)
+    def __getitem__(self, i):
+        img=Image.open(io.BytesIO(self._bytes[i])).convert('RGB')
+        if self.transform is not None: img=self.transform(img)
+        return img, self.targets[i]
+
+
+def celeba_transforms():
+    tf=transforms.Compose([transforms.CenterCrop(178), transforms.Resize(224), transforms.ToTensor(),
+                           transforms.Normalize((0.485,0.456,0.406),(0.229,0.224,0.225))])
+    return tf, tf
+
+
+def get_celeba(data_root: str = './data', batch_size: int = 128, num_workers: int = 4):
+    """Returns (train_loader, val_loader, test_loader)."""
+    root=Path(data_root)/'celeba'
+    tr=sorted(root.glob('train-*.parquet')); va=sorted(root.glob('validation-*.parquet')); te=sorted(root.glob('test-*.parquet'))
+    if not (tr and va and te):
+        raise FileNotFoundError(f"CelebA parquet not found in {root}: snapshot_download('tpremoli/CelebA-attrs', repo_type='dataset', allow_patterns='data/*') and move the files to data/celeba/")
+    tf,_=celeba_transforms()
+    mk=lambda ds,sh: DataLoader(ds,batch_size=batch_size,shuffle=sh,num_workers=num_workers,pin_memory=_pin_memory())
+    return mk(CelebADataset(tr,tf),True), mk(CelebADataset(va,tf),False), mk(CelebADataset(te,tf),False)
+
+
+# ---------------------------------------------------------------------------
 # Unified getter
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# CIFAR-10 / SVHN - datasets used as standard by Guided Dropout (AAAI'19) and related work
+#
+# Guided Dropout reports five datasets: MNIST/CIFAR10/CIFAR100/SVHN/TinyImageNet.
+# For a sign-consistency analysis, adding datasets is much cheaper and stronger
+# than adding seeds. Both are 32x32, so the same backbone and training budget
+# as CIFAR-100 can be reused unchanged.
+# ---------------------------------------------------------------------------
+
+def cifar10_transforms(strong: bool = False):
+    norm = transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                (0.2470, 0.2435, 0.2616))
+    base = [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip()]
+    if strong:
+        base.append(transforms.RandAugment(num_ops=2, magnitude=9))
+    train_tf = transforms.Compose(base + [transforms.ToTensor(), norm]
+                                  + ([transforms.RandomErasing(p=0.25)] if strong else []))
+    val_tf = transforms.Compose([transforms.ToTensor(), norm])
+    return train_tf, val_tf
+
+
+def svhn_transforms(strong: bool = False):
+    # SVHN contains digits, so horizontal flips must not be used (2 <-> 5 etc. get mirrored).
+    norm = transforms.Normalize((0.4377, 0.4438, 0.4728),
+                                (0.1980, 0.2010, 0.1970))
+    base = [transforms.RandomCrop(32, padding=4)]
+    if strong:
+        base.append(transforms.RandAugment(num_ops=2, magnitude=9))
+    train_tf = transforms.Compose(base + [transforms.ToTensor(), norm])
+    val_tf = transforms.Compose([transforms.ToTensor(), norm])
+    return train_tf, val_tf
+
+
+def _ensure_cifar10(data_root: str):
+    """Download CIFAR-10 from a HuggingFace parquet mirror and convert it to torchvision format.
+
+    The canonical cs.toronto.edu server was measured throttled at 34 KB/s (over an hour for
+    170 MB); the HF mirror gave 48 MB/s at the same time (same reason as _ensure_cifar100).
+    """
+    import os, io, pickle, urllib.request
+    import numpy as np
+    from PIL import Image
+    extracted = os.path.join(data_root, 'cifar-10-batches-py')
+    if os.path.isdir(extracted) and os.path.isfile(os.path.join(extracted, 'batches.meta')):
+        return
+    os.makedirs(extracted, exist_ok=True)
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'pyarrow'])
+        import pyarrow.parquet as pq
+
+    names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+             'dog', 'frog', 'horse', 'ship', 'truck']
+    with open(os.path.join(extracted, 'batches.meta'), 'wb') as f:
+        pickle.dump({'label_names': names}, f)
+
+    base = 'https://huggingface.co/datasets/uoft-cs/cifar10/resolve/main/plain_text'
+    for split, out_name in [('train', 'data_batch_1'), ('test', 'test_batch')]:
+        print(f'  CIFAR-10: fetching HF {split} parquet')
+        tmp = os.path.join(data_root, f'cifar10_{split}.parquet')
+        urllib.request.urlretrieve(f'{base}/{split}-00000-of-00001.parquet', tmp)
+        tbl = pq.read_table(tmp).to_pandas()
+        img_col = 'img' if 'img' in tbl.columns else 'image'
+        lab_col = 'label' if 'label' in tbl.columns else 'fine_label'
+        data = np.empty((len(tbl), 3 * 32 * 32), dtype=np.uint8)
+        labels = []
+        for i, (im, lb) in enumerate(zip(tbl[img_col], tbl[lab_col])):
+            raw = im['bytes'] if isinstance(im, dict) else im
+            arr = np.array(Image.open(io.BytesIO(raw)).convert('RGB'), dtype=np.uint8)
+            data[i] = arr.transpose(2, 0, 1).reshape(-1)      # CHW flatten
+            labels.append(int(lb))
+        # torchvision reads with encoding='latin1', but bytes keys in a Python 3 pickle
+        # stay bytes. String keys are needed for entry["data"] to be found.
+        with open(os.path.join(extracted, out_name), 'wb') as f:
+            pickle.dump({'data': data, 'labels': labels}, f)
+        os.remove(tmp)
+        print(f'  CIFAR-10: {split} -> {out_name} ({len(labels)} images)')
+
+
+class _CIFAR10NoIntegrityCheck(datasets.CIFAR10):
+    """The converted files differ from the original checksums, so skip the integrity check."""
+    train_list = [['data_batch_1', None]]
+    test_list = [['test_batch', None]]
+    meta = {'filename': 'batches.meta', 'key': 'label_names', 'md5': None}
+
+    def _check_integrity(self):
+        import os
+        root = os.path.join(self.root, self.base_folder)
+        return all(os.path.isfile(os.path.join(root, f))
+                   for f in ('batches.meta', 'data_batch_1', 'test_batch'))
+
+
+def get_cifar10(data_root: str = './data', batch_size: int = 128,
+                num_workers: int = 4, strong_aug: bool = False):
+    train_tf, val_tf = cifar10_transforms(strong_aug)
+    _ensure_cifar10(data_root)
+    tr = _CIFAR10NoIntegrityCheck(data_root, train=True, download=False, transform=train_tf)
+    va = _CIFAR10NoIntegrityCheck(data_root, train=False, download=False, transform=val_tf)
+    return (DataLoader(tr, batch_size=batch_size, shuffle=True,
+                       num_workers=num_workers, pin_memory=_pin_memory()),
+            DataLoader(va, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=_pin_memory()))
+
+
+def get_svhn(data_root: str = './data', batch_size: int = 128,
+             num_workers: int = 4, strong_aug: bool = False):
+    train_tf, val_tf = svhn_transforms(strong_aug)
+    tr = datasets.SVHN(data_root, split='train', download=True, transform=train_tf)
+    va = datasets.SVHN(data_root, split='test', download=True, transform=val_tf)
+    return (DataLoader(tr, batch_size=batch_size, shuffle=True,
+                       num_workers=num_workers, pin_memory=_pin_memory()),
+            DataLoader(va, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=_pin_memory()))
+
+
+def mnist_transforms(strong: bool = False):
+    """MNIST. One of the five benchmarks used by Guided Dropout (AAAI'19).
+
+    28x28 grayscale is converted to 32x32 with 3 channels so the CIFAR backbones (3ch, 32x32)
+    can be used unchanged, keeping the architecture axis orthogonal to the dataset axis.
+    No horizontal flips (digits would be mirrored).
+    """
+    norm = transforms.Normalize((0.1307,) * 3, (0.3081,) * 3)
+    base = [transforms.Resize(32),
+            transforms.Grayscale(num_output_channels=3)]
+    aug = [transforms.RandomCrop(32, padding=4)]
+    if strong:
+        aug.append(transforms.RandAugment(num_ops=2, magnitude=9))
+    train_tf = transforms.Compose(base + aug + [transforms.ToTensor(), norm])
+    val_tf = transforms.Compose(base + [transforms.ToTensor(), norm])
+    return train_tf, val_tf
+
+
+def get_mnist(data_root: str = './data', batch_size: int = 128,
+              num_workers: int = 4, strong_aug: bool = False):
+    train_tf, val_tf = mnist_transforms(strong_aug)
+    tr = datasets.MNIST(data_root, train=True, download=True, transform=train_tf)
+    va = datasets.MNIST(data_root, train=False, download=True, transform=val_tf)
+    return (DataLoader(tr, batch_size=batch_size, shuffle=True,
+                       num_workers=num_workers, pin_memory=_pin_memory()),
+            DataLoader(va, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=_pin_memory()))
+
 
 DATASET_CONFIG = {
     'cifar100': {
@@ -511,6 +777,24 @@ DATASET_CONFIG = {
         'pretrained':  False,
         'getter':      get_cifar100_lt,
     },
+    'mnist': {
+        'num_classes': 10,
+        'arch':        'resnet18',
+        'pretrained':  False,
+        'getter':      get_mnist,
+    },
+    'cifar10': {
+        'num_classes': 10,
+        'arch':        'resnet18',
+        'pretrained':  False,
+        'getter':      get_cifar10,
+    },
+    'svhn': {
+        'num_classes': 10,
+        'arch':        'resnet18',
+        'pretrained':  False,
+        'getter':      get_svhn,
+    },
     'tinyimagenet': {
         'num_classes': 200,
         'arch':        'resnet50',
@@ -523,34 +807,441 @@ DATASET_CONFIG = {
         'pretrained':  True,          # ImageNet pretrain strongly recommended
         'getter':      get_cub200,
     },
+    'waterbirds': {
+        'num_classes': 2,
+        'arch':        'resnet50',
+        'pretrained':  True,
+        'getter':      get_waterbirds,   # returns a (train, val, test) 3-tuple
+        'has_test':    True,
+    },
+    'celeba': {
+        'num_classes': 2,
+        'arch':        'resnet50',
+        'pretrained':  True,
+        'getter':      get_celeba,
+        'has_test':    True,
+    },
+    **{f'spawrious_{c}': {'num_classes': 4, 'arch': 'resnet50', 'pretrained': True, 'has_test': True,
+                          'getter': (lambda c: (lambda *a, **k: get_spawrious(c, *a, **k)))(c)}
+       for c in ('o2o_easy', 'o2o_medium', 'o2o_hard')},
+    **{f'cmnist_{b}': {'num_classes': 10, 'arch': 'resnet18', 'pretrained': False, 'has_test': True,
+                       'getter': (lambda b: (lambda *a, **k: get_cmnist(b, *a, **k)))(float(b))}
+       for b in ('0.95', '0.98', '0.995')},
+    'bar': {'num_classes': 6, 'arch': 'resnet50', 'pretrained': True, 'has_test': True, 'getter': (lambda *a, **k: get_bar(*a, **k))},
+    'metashift': {'num_classes': 2, 'arch': 'resnet50', 'pretrained': True, 'has_test': True, 'getter': (lambda *a, **k: get_metashift(*a, **k))},
+    'nicopp': {'num_classes': 2, 'arch': 'resnet50', 'pretrained': True, 'has_test': True, 'getter': (lambda *a, **k: get_nicopp(*a, **k))},
 }
 
 
 def get_dataset(name: str, data_root: str = './data', batch_size: int = 128,
                 num_workers: int = 4, strong_aug: bool = False,
                 imb_ratio: float = 1.0, subset_frac: float = 1.0,
-                label_noise: float = 0.0, seed: int = 0):
+                label_noise: float = 0.0, seed: int = 0,
+                val_frac: float = 0.0, split_seed: int = None):
     """
-    Returns (train_loader, val_loader, num_classes, default_arch, pretrained).
+    Returns (train_loader, val_loader, num_classes, default_arch, pretrained, test_loader).
 
-    imb_ratio / subset_frac / label_noise apply to 'cifar100' and 'cifar100_lt'
-    and are ignored elsewhere.
+    If val_frac > 0, a class-stratified val_frac fraction of the training set is held
+    out as validation, and the original val_loader (= official test) is passed on as test_loader.
+    Checkpoints are selected on validation, final numbers reported on test. The split indices
+    are stored in train_loader.split_indices and saved to json by train.py.
+    split_seed is separate from the model seed (defaults to the seed).
+    test_loader exists only for datasets with separate official val/test splits (e.g. waterbirds), otherwise None.
+    If it is None, train.py follows the older convention of selecting checkpoints on val_loader (= test set).
+
+    imb_ratio / label_noise apply only to 'cifar100' / 'cifar100_lt'.
+    subset_frac applies to **all datasets** (see _apply_subset below).
+
+    [Note] subset_frac used to be silently ignored outside cifar100.
+    train.py's run_id appends a _sub tag, so ignoring it would save full-data runs
+    under the name of low-data runs. Unsupported combinations must raise an
+    error instead of being ignored.
     """
-    if name not in DATASET_CONFIG:
+    if name.startswith('nicopp:'):                  # 'nicopp:<classA>,<classB>:<ctx0>,<ctx1>'
+        cls, ctx = (x.split(',') for x in name[len('nicopp:'):].split(':'))
+        assert len(cls) == 2 and len(ctx) == 2, name
+        cfg = dict(DATASET_CONFIG['nicopp'], getter=lambda *a, **k: get_nicopp(*a, classes=cls, contexts=ctx, **k))
+    elif name not in DATASET_CONFIG:
         raise ValueError(f"Unknown dataset '{name}'. "
-                         f"Choose from: {list(DATASET_CONFIG.keys())}")
-    cfg = DATASET_CONFIG[name]
+                         f"Choose from: {list(DATASET_CONFIG.keys())} or nicopp:<A>,<B>:<ctx0>,<ctx1>")
+    else:
+        cfg = DATASET_CONFIG[name]
     getter = cfg['getter']
+    test_loader = None
     if name == 'cifar100_lt' or (name == 'cifar100' and
                                  (imb_ratio > 1.0 or subset_frac < 1.0 or label_noise > 0.0)):
         train_loader, val_loader = get_cifar100_lt(
             data_root, batch_size, num_workers, strong_aug=strong_aug,
             imb_ratio=imb_ratio, subset_frac=subset_frac,
             label_noise=label_noise, seed=seed)
-    elif name == 'cifar100':
+    elif name in ('cifar100', 'cifar10', 'svhn', 'mnist'):
         train_loader, val_loader = getter(data_root, batch_size, num_workers,
                                           strong_aug=strong_aug)
+        if subset_frac < 1.0:
+            train_loader = _apply_subset(train_loader, subset_frac, seed,
+                                         batch_size, num_workers)
     else:
-        train_loader, val_loader = getter(data_root, batch_size, num_workers)
+        if imb_ratio > 1.0 or label_noise > 0.0:
+            raise ValueError(
+                f"'{name}' does not support imb_ratio / label_noise "
+                f"(requested: imb_ratio={imb_ratio}, label_noise={label_noise}). "
+                "Silently ignoring them would make the run_id tag disagree with the actual settings.")
+        out = getter(data_root, batch_size, num_workers)
+        if cfg.get('has_test'):
+            train_loader, val_loader, test_loader = out
+        else:
+            train_loader, val_loader = out
+        if subset_frac < 1.0:
+            train_loader = _apply_subset(train_loader, subset_frac, seed,
+                                         batch_size, num_workers)
+    if val_frac > 0.0:
+        if test_loader is not None:
+            raise ValueError(f"'{name}' has an official validation split and does not use val_frac.")
+        test_loader = val_loader
+        train_loader._val_transform = getattr(val_loader.dataset, 'transform', None)
+        train_loader, val_loader = _split_train_val(
+            train_loader, val_frac, seed if split_seed is None else split_seed,
+            batch_size, num_workers)
     return (train_loader, val_loader,
-            cfg['num_classes'], cfg['arch'], cfg['pretrained'])
+            cfg['num_classes'], cfg['arch'], cfg['pretrained'], test_loader)
+
+
+def _split_train_val(train_loader, val_frac: float, split_seed: int,
+                     batch_size: int, num_workers: int):
+    """Split the training loader's dataset (possibly a Subset) into train/val, stratified by class.
+    The val part uses the non-augmented test transform (a shallow copy of the same source dataset with only the transform replaced)."""
+    import copy
+    ds = train_loader.dataset
+    if isinstance(ds, Subset):
+        base, idx = ds.dataset, list(ds.indices)
+    else:
+        base, idx = ds, list(range(len(ds)))
+    targets = base.targets
+    by_cls = {}
+    for i in idx:
+        by_cls.setdefault(int(targets[i]), []).append(i)
+    rng = np.random.RandomState(split_seed + 2)
+    tr, va = [], []
+    for c, ids in sorted(by_cls.items()):
+        ids = list(rng.permutation(ids))
+        k = int(round(len(ids) * val_frac)) if len(ids) >= 2 else 0
+        va += ids[:k]; tr += ids[k:]
+    tr, va = sorted(map(int, tr)), sorted(map(int, va))
+    # val without augmentation: shallow-copy the source dataset and replace the transform with the test transform
+    base_eval = copy.copy(base)
+    vt = getattr(train_loader, '_val_transform', None)
+    if vt is not None:
+        base_eval.transform = vt
+    print(f"[val split] train {len(tr)} / val {len(va)}  (val_frac={val_frac:g}, split_seed={split_seed})")
+    tl = DataLoader(Subset(base, tr), batch_size=batch_size, shuffle=True,
+                    num_workers=num_workers, pin_memory=_pin_memory())
+    vl = DataLoader(Subset(base_eval, va), batch_size=batch_size, shuffle=False,
+                    num_workers=num_workers, pin_memory=_pin_memory())
+    tl.split_indices = {'train': tr, 'val': va, 'split_seed': split_seed, 'val_frac': val_frac}
+    return tl, vl
+
+
+# ---------------------------------------------------------------------------
+# Spawrious (Lynch et al. 2023) O2O challenges — 4 dog breeds × backgrounds.
+# ---------------------------------------------------------------------------
+# Train: each breed on its own background (folders 0/1: 3072 + 2756 images) plus a
+# filler background shared by all breeds (96 + 412 per breed) → own-background ≈ 92%.
+# Test: each breed on a *different* breed's training background (both folders).
+# Layout: data/spawrious/spawrious224/{0,1}/{location}/{breed}/*.png  (official tarballs).
+# Group = (breed, location); worst-group over the 4 test (breed, location) cells.
+
+class SpawriousDataset(Dataset):
+    CLASSES = ["bulldog", "corgi", "dachshund", "labrador"]
+    LOCS = ["desert", "jungle", "dirt", "mountain", "snow", "beach"]
+    COMBOS = {  # (train group per class, test group per class, filler)
+        'o2o_easy':   (["desert", "jungle", "dirt", "snow"],     ["dirt", "snow", "desert", "jungle"],  "beach"),
+        'o2o_medium': (["mountain", "beach", "dirt", "jungle"],  ["jungle", "dirt", "beach", "snow"],   "desert"),
+        'o2o_hard':   (["jungle", "mountain", "snow", "desert"], ["mountain", "snow", "desert", "jungle"], "beach"),
+    }
+    ORDER = ["bulldog", "dachshund", "labrador", "corgi"]   # order used by the official combination table
+
+    def __init__(self, root, challenge, split, transform=None):
+        import os
+        group, test, filler = self.COMBOS[challenge]
+        total = 3168; counts = [int(0.97 * total), int(0.87 * total)]
+        items = []
+        def folder(ind, loc, cls, limit=None):
+            d = Path(root) / 'spawrious224' / str(ind) / loc / cls
+            fs = sorted(f for f in os.listdir(d) if f.lower().endswith(('.png', '.jpg', '.jpeg')))
+            if limit: fs = fs[:limit]
+            return [(str(d / f), self.CLASSES.index(cls), self.LOCS.index(loc)) for f in fs]
+        if split == 'train':
+            for k, cls in enumerate(self.ORDER):
+                for ind in (0, 1):
+                    items += folder(ind, group[k], cls, counts[ind])
+            for ind in (0, 1):
+                for cls in self.ORDER:
+                    items += folder(ind, filler, cls, total - counts[ind])
+        else:
+            for k, cls in enumerate(self.ORDER):
+                for ind in (0, 1):
+                    items += folder(ind, test[k], cls)
+        self.paths = [i[0] for i in items]; self.targets = [i[1] for i in items]; self.places = [i[2] for i in items]
+        self.transform = transform
+
+    def __len__(self): return len(self.targets)
+    def __getitem__(self, i):
+        img = Image.open(self.paths[i]).convert('RGB')
+        if self.transform is not None: img = self.transform(img)
+        return img, self.targets[i]
+
+
+def get_spawrious(challenge, data_root='./data', batch_size=64, num_workers=4, val_frac=0.1):
+    """(train, val, test). val = class-stratified 10% of the official train set (fixed RandomState(0))."""
+    root = Path(data_root) / 'spawrious'
+    if not (root / 'spawrious224').exists():
+        raise FileNotFoundError(f"Spawrious not found: {root}/spawrious224 - download and extract the official spawrious224 tarballs (github.com/aengusl/spawrious) into {root}")
+    tf, _ = waterbirds_transforms()
+    tr = SpawriousDataset(root, challenge, 'train', tf); te = SpawriousDataset(root, challenge, 'test', tf)
+    rng = np.random.RandomState(0); tr_idx, va_idx = [], []
+    y = np.asarray(tr.targets)
+    for c in np.unique(y):
+        ids = rng.permutation(np.where(y == c)[0]); k = int(round(len(ids) * val_frac))
+        va_idx += ids[:k].tolist(); tr_idx += ids[k:].tolist()
+    keep = lambda ds, idx: (setattr(ds, 'paths', [ds.paths[i] for i in idx]), setattr(ds, 'targets', [ds.targets[i] for i in idx]),
+                            setattr(ds, 'places', [ds.places[i] for i in idx]), ds)[-1]
+    import copy
+    va = keep(copy.copy(tr), sorted(va_idx)); tr = keep(tr, sorted(tr_idx))
+    print(f"[spawrious {challenge}] train {len(tr)} / val {len(va)} / test {len(te)}")
+    mk = lambda ds, sh: DataLoader(ds, batch_size=batch_size, shuffle=sh, num_workers=num_workers, pin_memory=_pin_memory())
+    return mk(tr, True), mk(va, False), mk(te, False)
+
+
+# ---------------------------------------------------------------------------
+# Colored-MNIST (LfF protocol, Nam et al. 2020): digit colour correlated with the label.
+# ---------------------------------------------------------------------------
+# Train: with probability `bias` the digit gets its class colour, else a random other colour.
+# Test: colour uniformly random (unbiased). Group = (label, colour): 100 cells; the
+# bias-conflicting accuracy (colour != class colour) is computed from the dump.
+
+_CMNIST_COLORS = np.array([[230,25,75],[60,180,75],[255,225,25],[0,130,200],[245,130,48],
+                           [145,30,180],[70,240,240],[240,50,230],[210,245,60],[250,190,190]], dtype=np.float32)
+
+class ColoredMNIST(Dataset):
+    def __init__(self, data_root, train, bias, seed=0, transform=None):
+        base = datasets.MNIST(data_root, train=train, download=True)
+        x = base.data.numpy(); y = base.targets.numpy(); rng = np.random.RandomState(seed + (0 if train else 12345))
+        if train:
+            aligned = rng.rand(len(y)) < bias
+            col = np.where(aligned, y, (y + rng.randint(1, 10, len(y))) % 10)
+        else:
+            col = rng.randint(0, 10, len(y))
+        mask = (x.astype(np.float32) / 255.0)[:, None]                       # N,1,28,28
+        colours = _CMNIST_COLORS[col] + rng.randn(len(y), 3).astype(np.float32) * 10.0   # per-image jitter
+        img = (mask * colours[:, :, None, None]).clip(0, 255).astype(np.uint8)  # N,3,28,28
+        self.imgs = img; self.targets = y.tolist(); self.places = col.tolist(); self.transform = transform
+    def __len__(self): return len(self.targets)
+    def __getitem__(self, i):
+        img = Image.fromarray(np.transpose(self.imgs[i], (1, 2, 0)))
+        if self.transform is not None: img = self.transform(img)
+        return img, self.targets[i]
+
+def get_cmnist(bias, data_root='./data', batch_size=128, num_workers=4, val_frac=0.1):
+    norm = transforms.Normalize((0.5,) * 3, (0.5,) * 3)
+    tf = transforms.Compose([transforms.Resize(32), transforms.ToTensor(), norm])
+    tr = ColoredMNIST(data_root, True, bias, transform=tf); te = ColoredMNIST(data_root, False, bias, transform=tf)
+    rng = np.random.RandomState(0); y = np.asarray(tr.targets); tr_idx, va_idx = [], []
+    for c in range(10):
+        ids = rng.permutation(np.where(y == c)[0]); k = int(round(len(ids) * val_frac)); va_idx += ids[:k].tolist(); tr_idx += ids[k:].tolist()
+    import copy
+    def keep(ds, idx):
+        ds.imgs = ds.imgs[idx]; ds.targets = [ds.targets[i] for i in idx]; ds.places = [ds.places[i] for i in idx]; return ds
+    va = keep(copy.copy(tr), sorted(va_idx)); tr = keep(tr, sorted(tr_idx))
+    yy = np.asarray(tr.targets); pp = np.asarray(tr.places)
+    print(f"[cmnist bias={bias}] train {len(tr)} (aligned {100*(yy==pp).mean():.1f}%) / val {len(va)} / test {len(te)}")
+    mk = lambda ds, sh: DataLoader(ds, batch_size=batch_size, shuffle=sh, num_workers=num_workers, pin_memory=_pin_memory())
+    return mk(tr, True), mk(va, False), mk(te, False)
+
+
+# ---------------------------------------------------------------------------
+# BAR — Biased Action Recognition (Nam et al. 2020). data/BAR/{train,test}/<class>/*.jpg
+# Train images are place-aligned, test images are place-conflicting; no explicit place label,
+# so `places` = class index and the group table reduces to per-class test accuracy.
+# ---------------------------------------------------------------------------
+class BARDataset(Dataset):
+    CLASSES = ['climbing', 'diving', 'fishing', 'racing', 'throwing', 'pole vaulting']
+    def __init__(self, root, split, transform=None):
+        import os
+        d = Path(root) / split; self.classes = self.CLASSES; self.paths = []; self.targets = []
+        for f in sorted(os.listdir(d)):                       # flat layout: <class>_<n>.jpg
+            if not f.lower().endswith(('.jpg', '.jpeg', '.png')): continue
+            c = f.rsplit('_', 1)[0].lower()                   # 'pole vaulting_12.jpg' -> 'pole vaulting'
+            if c in self.CLASSES: self.paths.append(str(d / f)); self.targets.append(self.CLASSES.index(c))
+        self.places = list(self.targets); self.transform = transform
+    def __len__(self): return len(self.targets)
+    def __getitem__(self, i):
+        img = Image.open(self.paths[i]).convert('RGB')
+        if self.transform is not None: img = self.transform(img)
+        return img, self.targets[i]
+
+def get_bar(data_root='./data', batch_size=64, num_workers=4, val_frac=0.1):
+    root = Path(data_root) / 'BAR'
+    if not (root / 'train').exists(): raise FileNotFoundError(f"BAR not found: {root} - git clone https://github.com/alinlab/BAR")
+    tf, _ = waterbirds_transforms()
+    tr = BARDataset(root, 'train', tf); te = BARDataset(root, 'test', tf)
+    rng = np.random.RandomState(0); y = np.asarray(tr.targets); tr_idx, va_idx = [], []
+    for c in range(len(tr.classes)):
+        ids = rng.permutation(np.where(y == c)[0]); k = int(round(len(ids) * val_frac)); va_idx += ids[:k].tolist(); tr_idx += ids[k:].tolist()
+    import copy
+    def keep(ds, idx):
+        ds.paths = [ds.paths[i] for i in idx]; ds.targets = [ds.targets[i] for i in idx]; ds.places = [ds.places[i] for i in idx]; return ds
+    va = keep(copy.copy(tr), sorted(va_idx)); tr = keep(tr, sorted(tr_idx))
+    print(f"[BAR] classes {tr.classes} train {len(tr)} / val {len(va)} / test {len(te)}")
+    mk = lambda ds, sh: DataLoader(ds, batch_size=batch_size, shuffle=sh, num_workers=num_workers, pin_memory=_pin_memory())
+    return mk(tr, True), mk(va, False), mk(te, False)
+
+
+# ---------------------------------------------------------------------------
+# MetaShift cat-vs-dog (Liang & Zou 2022), DISC subset (Wu et al. 2023): background shortcut.
+# ---------------------------------------------------------------------------
+# Train: cat(bed, sofa) = indoor vs dog(bench, bike) = outdoor -> background fully
+# correlated with the label (380+231 / 145+367). Test: both classes on 'shelf'
+# (235 / 306), a context unseen in training. place: 0 indoor, 1 outdoor, 2 shelf;
+# worst-group over the 2 test cells (cat/shelf, dog/shelf) -- dog/shelf is the
+# label-conflicting one (indoor-looking background, dog label).
+# Layout: data/metashifts/MetaDatasetCatDog/{train,test}/{cat,dog}/<cls>(<ctx>)/*.jpg
+# Download: the MetaDatasetCatDog zip released with DISC (Wu et al. 2023) / MetaShift.
+
+class MetaShiftDataset(BARDataset):
+    CLASSES = ['cat', 'dog']
+    PLACES = {'bed': 0, 'sofa': 0, 'bench': 1, 'bike': 1, 'shelf': 2}
+    def __init__(self, root, split, transform=None):
+        import os
+        self.classes = self.CLASSES; self.paths = []; self.targets = []; self.places = []
+        for cls in self.CLASSES:
+            for ctx in sorted(os.listdir(Path(root) / split / cls)):          # 'cat(bed)'
+                d = Path(root) / split / cls / ctx
+                if not d.is_dir(): continue
+                pl = self.PLACES[ctx[ctx.index('(') + 1:ctx.index(')')]]
+                for f in sorted(os.listdir(d)):
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        self.paths.append(str(d / f)); self.targets.append(self.CLASSES.index(cls)); self.places.append(pl)
+        self.transform = transform
+
+def get_metashift(data_root='./data', batch_size=64, num_workers=4, val_frac=0.1):
+    """(train, val, test). val = class-stratified 10% of the official train set (fixed RandomState(0), as get_bar)."""
+    root = Path(data_root) / 'metashifts' / 'MetaDatasetCatDog'
+    if not (root / 'train').exists(): raise FileNotFoundError(f"MetaShift not found: {root} - download the MetaDatasetCatDog release of MetaShift (github.com/Weixin-Liang/MetaShift) and extract it to {root}")
+    tf, _ = waterbirds_transforms()
+    tr = MetaShiftDataset(root, 'train', tf); te = MetaShiftDataset(root, 'test', tf)
+    rng = np.random.RandomState(0); y = np.asarray(tr.targets); tr_idx, va_idx = [], []
+    for c in range(len(tr.classes)):
+        ids = rng.permutation(np.where(y == c)[0]); k = int(round(len(ids) * val_frac)); va_idx += ids[:k].tolist(); tr_idx += ids[k:].tolist()
+    import copy
+    def keep(ds, idx):
+        ds.paths = [ds.paths[i] for i in idx]; ds.targets = [ds.targets[i] for i in idx]; ds.places = [ds.places[i] for i in idx]; return ds
+    va = keep(copy.copy(tr), sorted(va_idx)); tr = keep(tr, sorted(tr_idx))
+    print(f"[metashift] train {len(tr)} / val {len(va)} / test {len(te)}")
+    mk = lambda ds, sh: DataLoader(ds, batch_size=batch_size, shuffle=sh, num_workers=num_workers, pin_memory=_pin_memory())
+    return mk(tr, True), mk(va, False), mk(te, False)
+
+
+# ---------------------------------------------------------------------------
+# NICO++ (Zhang et al. CVPR 2023) elephant-vs-sailboat, grass-vs-water: Waterbirds-style build.
+# ---------------------------------------------------------------------------
+# Source: HF `2018LZY/NICOplusplus` (unofficial 20-class x 6-domain DG subset, NICOpp.zip 1.37 GB).
+# Cells used (all images in the zip): elephant/grass 455, elephant/water 402,
+# sailboat/grass 332, sailboat/water 434. Construction (RandomState(0), sorted filenames):
+#   test  = 150 per cell (600, balanced over the 4 (class, context) cells);
+#   train = every remaining majority image (elephant/grass 305, sailboat/water 284) plus
+#           round(maj * 5/95) minority images (elephant/water 16, sailboat/grass 15)
+#           -> P(context == class-context | class) = 95% as in Waterbirds (620 images);
+#   val   = class-stratified 10% of train (62; drawn like train, as get_metashift).
+# place: 0 grass, 1 water; label==place is the majority group, so resample_groups works.
+# Layout: data/nicopp/NICOpp/{grass,water}/{elephant,sailboat}/*.jpg (zip as-is).
+# Generic form: dataset name 'nicopp:<classA>,<classB>:<ctx0>,<ctx1>' (parsed in get_dataset) builds
+# the same split for any pair; class A's majority context is ctx0, class B's is ctx1.
+
+class NICOppDataset(BARDataset):
+    CLASSES = ['elephant', 'sailboat']       # class c's majority context = CONTEXTS[c]
+    CONTEXTS = ['grass', 'water']
+    N_TEST, CORR = 150, 0.95
+    def __init__(self, root, split, transform=None, classes=None, contexts=None):
+        import os
+        self.classes = list(classes or self.CLASSES); self.contexts = list(contexts or self.CONTEXTS)
+        self.paths = []; self.targets = []; self.places = []
+        rng = np.random.RandomState(0)
+        for c, cls in enumerate(self.classes):
+            pools = {}
+            for pl, ctx in enumerate(self.contexts):
+                d = Path(root) / ctx / cls
+                fs = [str(d / f) for f in sorted(os.listdir(d)) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                fs = [fs[i] for i in rng.permutation(len(fs))]
+                pools[pl] = (fs[:self.N_TEST], fs[self.N_TEST:])            # (test, rest)
+            maj = pools[c][1]; mino = pools[1 - c][1][:int(round(len(maj) * (1 - self.CORR) / self.CORR))]
+            sel = {c: pools[c][0], 1 - c: pools[1 - c][0]} if split == 'test' else {c: maj, 1 - c: mino}
+            for pl, fs in sel.items():
+                self.paths += fs; self.targets += [c] * len(fs); self.places += [pl] * len(fs)
+        self.transform = transform
+
+def get_nicopp(data_root='./data', batch_size=64, num_workers=4, val_frac=0.1, classes=None, contexts=None):
+    """(train, val, test). val = class-stratified 10% of the constructed train set (fixed RandomState(0), as get_metashift)."""
+    root = Path(data_root) / 'nicopp' / 'NICOpp'
+    if not (root / 'grass').exists(): raise FileNotFoundError(f"NICO++ not found: {root} - download NICOpp.zip (huggingface.co/datasets/2018LZY/NICOplusplus) and extract it to {root.parent}")
+    tf, _ = waterbirds_transforms()
+    tr = NICOppDataset(root, 'train', tf, classes, contexts); te = NICOppDataset(root, 'test', tf, classes, contexts)
+    rng = np.random.RandomState(0); y = np.asarray(tr.targets); tr_idx, va_idx = [], []
+    for c in range(len(tr.classes)):
+        ids = rng.permutation(np.where(y == c)[0]); k = int(round(len(ids) * val_frac)); va_idx += ids[:k].tolist(); tr_idx += ids[k:].tolist()
+    import copy
+    def keep(ds, idx):
+        ds.paths = [ds.paths[i] for i in idx]; ds.targets = [ds.targets[i] for i in idx]; ds.places = [ds.places[i] for i in idx]; return ds
+    va = keep(copy.copy(tr), sorted(va_idx)); tr = keep(tr, sorted(tr_idx))
+    g = lambda ds: {(a, b): int(((np.asarray(ds.targets) == a) & (np.asarray(ds.places) == b)).sum()) for a in (0, 1) for b in (0, 1)}
+    print(f"[nicopp {tr.classes} x {tr.contexts}] train {len(tr)} {g(tr)} / val {len(va)} {g(va)} / test {len(te)} {g(te)}")
+    mk = lambda ds, sh: DataLoader(ds, batch_size=batch_size, shuffle=sh, num_workers=num_workers, pin_memory=_pin_memory())
+    return mk(tr, True), mk(va, False), mk(te, False)
+
+
+def resample_groups(ds, corr=None, class_balance=False, seed=0):
+    """In-place subsample of a dataset with `targets`/`places` lists (Waterbirds, CelebA).
+
+    corr:  keep every minority image (label != place) and subsample the majority group of
+           each class to m_c * corr/(1-corr), so P(place==label | class) == corr.
+    class_balance: subsample the larger class to the smaller class size (SUBY), uniform
+           within class, so the group ratio inside each class is unchanged.
+    Same seed -> same subset across methods (RandomState(seed+1), as _apply_subset).
+    """
+    assert hasattr(ds, 'targets') and hasattr(ds, 'places'), 'dataset needs targets/places'
+    rng = np.random.RandomState(seed + 1)
+    y = np.asarray(ds.targets); pl = np.asarray(ds.places); keep = np.arange(len(y))
+    if corr is not None:
+        assert 0.0 < corr < 1.0
+        sel = []
+        for c in np.unique(y):
+            mino = np.where((y == c) & (pl != c))[0]; majo = np.where((y == c) & (pl == c))[0]
+            k = min(len(majo), int(round(len(mino) * corr / (1 - corr))))
+            sel += [mino, rng.choice(majo, k, replace=False)]
+        keep = np.sort(np.concatenate(sel))
+    if class_balance:
+        yk = y[keep]; n = min((yk == c).sum() for c in np.unique(yk))
+        sel = [rng.choice(keep[yk == c], n, replace=False) for c in np.unique(yk)]
+        keep = np.sort(np.concatenate(sel))
+    keep = keep.tolist()
+    ds._bytes = [ds._bytes[i] for i in keep]
+    ds.targets = [ds.targets[i] for i in keep]; ds.places = [ds.places[i] for i in keep]
+    y = np.asarray(ds.targets); pl = np.asarray(ds.places)
+    print(f"[resample] corr={corr} class_balance={class_balance}: {len(keep)} images, "
+          f"groups(y,p)=" + str({(int(a), int(b)): int(((y == a) & (pl == b)).sum()) for a in (0, 1) for b in (0, 1)}))
+
+
+def _apply_subset(loader, subset_frac: float, seed: int,
+                  batch_size: int, num_workers: int):
+    """Shrink the training loader to a subset_frac fraction (for datasets other than CIFAR).
+
+    The same seed must always give the same subset, so that comparisons between methods
+    form a block design. Uses the same RandomState(seed+1) convention as the cifar100 path.
+    """
+    ds = loader.dataset
+    n = len(ds)
+    k = max(1, int(round(n * subset_frac)))
+    idx = np.random.RandomState(seed + 1).permutation(n)[:k]
+    sub = torch.utils.data.Subset(ds, np.sort(idx).tolist())
+    print(f"[subset] keeping {k} training images ({subset_frac:.0%})")
+    return DataLoader(sub, batch_size=batch_size, shuffle=True,
+                      num_workers=num_workers, pin_memory=_pin_memory())
