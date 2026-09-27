@@ -23,5 +23,11 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
-sdrop_vit.py.bak
-train.py.bak
+*.bak
+
+# Run outputs
+*.pth
+*_history.csv
+*_dump.npz
+*_gradchan.csv
+*_gradclean.csv

@@ -1,272 +1,114 @@
 # Suppressive Dropout (SDrop)
-**An Explainable Channel-Selective Regularization Method for Preserving Rare Features**
 
-Seunghyun Lee — Korea University
+Seunghyun Lee, Korea University
 
-Accepted at **XAI-2026** — *The 4th World Conference on eXplainable Artificial Intelligence* (Demo Track, Paper 8770), Fortaleza, Brazil, July 2026. Extended journal version under preparation for Neurocomputing (Elsevier).
+Code for **Suppressive Dropout (SDrop)**, presented as a demo at xAI 2026 (Late-Breaking Work, Demos and Doctoral Consortium). The demo paper is in [`paper/SDrop_XAI2026_demo.pdf`](paper/SDrop_XAI2026_demo.pdf).
 
----
+## What SDrop is
 
-## Paper
+SDrop is a channel dropout that, during fine-tuning, drops **each sample's most active channels**. For every input it scores the channels of a feature map from their own activations and drops high-scoring channels with higher probability. This is the reverse of attention-style or weighted channel dropout, which keeps strong channels and drops weak ones. SDrop has no learnable parameters and uses no labels or group annotations. At test time it is the identity.
 
-[SDrop: A Demonstration of Explainable Channel-Selective Regularization for Preserving Rare Features](paper/SDrop_XAI2026_demo.pdf) — XAI-2026, Demo Track (Paper 8770).
+## Scores and controls
 
----
+All variants live in `sdrop.py` and are selected with `--method` (and `--select`).
 
-## Quick Summary
+| Method | Score per channel `c` |
+|---|---|
+| `sdrop_energy` | energy `E_c = 1 - (1 + gamma * Sigma_c)^(-delta)`, where `Sigma_c` is the mean squared activation |
+| `sdrop_gap` | magnitude: global average pooled activation (GAP) |
+| `sdrop` | full EGPG score `E_c * (1 - P_c)`, where `P_c` is the spatial peakedness |
+| `--select topk` | drop the `k = round(p * C)` highest-scoring channels deterministically instead of sampling |
 
-SDrop drops the **most dominant channels** during training instead of random or weak ones.  
-The key insight: high-energy, diffuse channels monopolize the feature space via lateral inhibition, starving minority-class detectors of gradient signal.
+Controls use the same drop budget:
 
-| Method | What it drops | Score |
-|--------|--------------|-------|
-| Dropout | random | — |
-| Targeted Dropout | *weakest* channels | low magnitude |
-| **SDrop** | ***strongest*** channels | EGPG = $E_c(1-P_c)$ |
-| **SDropEnergy** | ***strongest*** channels | $E_c$ only |
-| **SGridLC** | strongest per spatial cell | EGPG per grid cell |
+| Method | Control |
+|---|---|
+| `sdrop_random` | random channels (uniform score) |
+| `sdrop_shuffle` | same set of drop probabilities, permuted across channels per sample |
+| `sdrop_reverse` | same set of probabilities, the highest scores get the lowest probabilities |
+| `sdrop_cross` | each sample receives another sample's probability vector (cross-sample) |
 
----
+`--norm mean` (default) makes the realised drop rate equal the nominal `--drop_rate`. Comparison baselines (`dropout`, `dropblock`, `wcd`, `focuseddrop`, `guided_topk`, `guided_dr`, `senet`, `cbam`) are in `baselines.py`.
 
-## Repository Structure
+## Datasets and backbones
 
-```
-sdrop-neurocomputing/
-├── sdrop.py        ← SDrop, SDropEnergy, SGridLC modules + factory
-├── model.py        ← ResNet-18/50 with SDrop at L3/L4
-├── dataset.py      ← CIFAR-100, TinyImageNet, CUB-200-2011 loaders
-├── train.py        ← training script (CLI)
-├── evaluate.py     ← evaluation: Acc, F1, AUC, ECE
-└── vis_*.png       ← EGPG score visualizations from the paper
-```
+Datasets (`--dataset`): `waterbirds`, `celeba`, `metashift`, NICO++ pairs (`nicopp` or `nicopp:<classA>,<classB>:<ctx0>,<ctx1>`), `spawrious_o2o_{easy,medium,hard}`, Colored-MNIST (`cmnist_0.95`, `cmnist_0.98`, `cmnist_0.995`), `bar`, `cub200`, `cifar100` (and `cifar100_lt`, `cifar10`, `svhn`, `mnist`, `tinyimagenet`). Data goes under `--data_root` (default `./data`); if a dataset is missing, the error message says where to get it and where to put it.
 
----
+Backbones: ResNet-18 and ResNet-50 (`--arch`, SDrop inserted after the stages given by `--layers`, e.g. `L4`), and ImageNet-pretrained ViT-B/16 (`vitb_*` methods act on last-block tokens, `vitbm_*` on the MLP hidden neurons of the second-to-last block).
 
-## Environment Setup
+## Installation
 
 ```bash
-pip install torch torchvision scikit-learn numpy
+git clone https://github.com/lshpy/sdrop.git && cd sdrop
+pip install -r requirements.txt
 ```
 
-Tested with: Python 3.10, PyTorch 2.x, CUDA 11.8+
-
----
-
-## Dataset Setup
-
-### 1. CIFAR-100
-**Auto-downloads.** No setup needed.
-
-```bash
-python train.py --dataset cifar100 --method none   # downloads automatically
-```
-
----
-
-### 2. TinyImageNet
-
-**Step 1:** Download and extract
-
-```bash
-cd data/
-wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
-unzip tiny-imagenet-200.zip
-```
-
-**Step 2:** Reformat validation set (run once)
+## Using the module
 
 ```python
-from dataset import reformat_tinyimagenet_val
-reformat_tinyimagenet_val('./data')
+import torch
+from sdrop import build_sdrop
+
+drop = build_sdrop('sdrop_energy', 0.1, norm='mean')   # or 'sdrop', 'sdrop_gap', 'sdrop_random', ...
+x = torch.relu(torch.randn(8, 2048, 7, 7))             # post-ReLU feature map (B, C, H, W)
+
+drop.train(); y = drop(x)                              # drops each sample's most active channels
+drop.eval();  assert torch.equal(drop(x), x)           # identity at test time
 ```
 
-Expected structure after reformatting:
-```
-data/tiny-imagenet-200/
-├── train/
-│   ├── n01443537/
-│   │   └── *.JPEG
-│   └── ...
-└── val/
-    ├── n01443537/      ← created by reformat_tinyimagenet_val()
-    │   └── *.JPEG
-    └── ...
-```
+Insert it after a backbone stage, e.g. `model.layer4 = nn.Sequential(model.layer4, drop)`, or use `model.build_model`, which does this for you.
 
----
+## Training on Waterbirds
 
-### 3. CUB-200-2011 (Priority — add for Neurocomputing submission)
-
-**Step 1:** Download
-
-```
-URL: https://www.vision.caltech.edu/datasets/cub_200_2011/
-File: CUB_200_2011.tgz  (~1.1 GB)
-```
-
-**Step 2:** Extract
+Waterbirds is read from the HuggingFace parquet release `grodino/waterbirds` placed in `data/waterbirds/`. Checkpoints are selected on the official validation split; test worst-group and average accuracy are reported at the end.
 
 ```bash
-tar -xzf CUB_200_2011.tgz -C data/
+COMMON="--dataset waterbirds --epochs 30 --lr 0.001 --weight_decay 1e-4 --batch_size 64 --seed 0"
+
+# ERM
+python train.py $COMMON --method none
+
+# SDrop (energy score) after layer4 of ResNet-50
+python train.py $COMMON --method sdrop_energy --drop_rate 0.1 --layers L4
+
+# Random-channel control at the same budget
+python train.py $COMMON --method sdrop_random --drop_rate 0.1 --layers L4
 ```
 
-Expected structure:
+Add `--dump_feats` to save validation/test logits and penultimate features (`*_dump.npz`) for the scripts in `analysis/`. Run `python train.py --help` for all options.
+
+## Repository layout
+
 ```
-data/CUB_200_2011/
-├── images/
-│   ├── 001.Black_footed_Albatross/
-│   │   └── Black_Footed_Albatross_*.jpg
-│   └── ...  (200 classes)
-├── images.txt
-├── image_class_labels.txt
-├── train_test_split.txt
-└── classes.txt
+sdrop.py            SDrop module: scores, selection, controls, schedules
+sdrop_vit.py        head/key/token SDrop for ViT trained from scratch
+vit_pretrained.py   ImageNet ViT-B/16 with SDrop on tokens or MLP neurons
+model.py            ResNet backbones with SDrop / baseline insertion
+baselines.py        DropBlock, WCD, FocusedDropout, Guided Dropout, SE, CBAM
+dataset.py          dataset loaders and splits
+train.py            training entry point
+evaluate.py         accuracy, ECE and related metrics
+evaluate_groups.py  per-group and worst-group accuracy
+analysis/           post-hoc analyses (run from the repo root, see each file's docstring)
+paper/              xAI 2026 demo paper
 ```
-
-**No further preprocessing needed.**  
-Train/test split is read from `train_test_split.txt` (5,994 train / 5,794 test).
-
----
-
-## Running Experiments
-
-### Replicate paper results
-
-```bash
-# --- CIFAR-100: best result (+0.77%p) ---
-python train.py --dataset cifar100 --method sdrop_energy --drop_rate 0.1 --layers L4
-
-# --- CIFAR-100: baseline ---
-python train.py --dataset cifar100 --method none
-
-# --- CIFAR-100: standard dropout ---
-python train.py --dataset cifar100 --method dropout --drop_rate 0.1 --layers L4
-python train.py --dataset cifar100 --method dropout --drop_rate 0.3 --layers L4
-
-# --- TinyImageNet: best result (+0.04%p) ---
-python train.py --dataset tinyimagenet --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 4
-```
-
-### Run 3 seeds (as in paper: mean ± std)
-
-```bash
-for seed in 0 1 2; do
-  python train.py \
-    --dataset cifar100 \
-    --method sdrop_energy \
-    --drop_rate 0.1 \
-    --layers L4 \
-    --seed $seed
-done
-```
-
-### CUB-200-2011 (new — to be run)
-
-```bash
-# Baseline
-python train.py --dataset cub200 --method none --epochs 60 --lr 0.01
-
-# SDrop_Energy (recommended first run)
-python train.py --dataset cub200 --method sdrop_energy --drop_rate 0.1 --layers L4 --epochs 60 --lr 0.01
-
-# SGridLC G=2
-python train.py --dataset cub200 --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 2 --epochs 60 --lr 0.01
-
-# SGridLC G=4
-python train.py --dataset cub200 --method sgridlc --drop_rate 0.3 --layers L3 --grid_size 4 --epochs 60 --lr 0.01
-```
-
-> **Note on CUB:** Uses ImageNet-pretrained ResNet-50 by default (strongly recommended for fine-grained tasks). lr=0.01 instead of 0.1.
-
----
-
-## Full Experiment Grid
-
-### CIFAR-100 (ResNet-18, 200 epochs, lr=0.1)
-
-| Method | Rate | Layer | Grid | Acc (%) | Status |
-|--------|------|-------|------|---------|--------|
-| Baseline | 0.0 | — | — | 76.65 ± 0.11 | done |
-| Dropout | 0.1 | L4 | — | 76.78 ± 0.11 | done |
-| Dropout | 0.3 | L4 | — | 76.41 ± 0.09 | done |
-| SDrop | 0.1 | L4 | — | 76.91 ± 0.13 | done |
-| **SDrop_Energy** | **0.1** | **L4** | **—** | **77.42 ± 0.16** | done ✓ best |
-| SGridLC | 0.1 | L3 | 2 | 76.76 ± 0.20 | done |
-
-### TinyImageNet (ResNet-50, 200 epochs, lr=0.1)
-
-| Method | Rate | Layer | Grid | Acc (%) | Status |
-|--------|------|-------|------|---------|--------|
-| Baseline | 0.0 | — | — | 48.62 ± 0.03 | done |
-| Dropout | 0.3 | L3 | — | 48.55 ± 0.25 | done |
-| SDrop_Energy | 0.1 | L3 | — | 48.54 ± 0.21 | done |
-| **SGridLC** | **0.3** | **L3** | **4** | **48.66 ± 0.42** | done ✓ best |
-| SGridLC | 0.1 | L3 | 4 | 32.34 ± 27.58 | done ⚠️ unstable |
-
-### CUB-200-2011 (ResNet-50 pretrained, 60 epochs, lr=0.01) — TODO
-
-| Method | Rate | Layer | Grid | Acc (%) | Status |
-|--------|------|-------|------|---------|--------|
-| Baseline | 0.0 | — | — | TBD | pending |
-| Dropout | 0.1 | L4 | — | TBD | pending |
-| Dropout | 0.3 | L4 | — | TBD | pending |
-| SDrop | 0.1 | L4 | — | TBD | pending |
-| SDrop_Energy | 0.1 | L4 | — | TBD | pending |
-| SDrop_Energy | 0.3 | L4 | — | TBD | pending |
-| SGridLC | 0.1 | L3 | 2 | TBD | pending |
-| SGridLC | 0.3 | L3 | 2 | TBD | pending |
-| SGridLC | 0.3 | L3 | 4 | TBD | pending |
-
----
-
-## Method Reference
-
-### EGPG Score
-
-$$s_c = E_c \cdot (1 - P_c)$$
-
-**Channel Energy** (suppression potential):
-$$E_c = 1 - \left(1 + \gamma \cdot \frac{1}{HW}\sum_{h,w} x_{c,h,w}^2\right)^{-\delta}$$
-
-**Spatial Peakedness** (activation concentration):
-$$P_c = \frac{\max_{h,w}|x_{c,h,w}|}{\sum_{h,w}|x_{c,h,w}| + \epsilon}$$
-
-**Drop probability**:
-$$p_{\text{drop},c} = p_{\text{base}} \cdot \frac{s_c}{\max_c s_c}$$
-
-High $s_c$ = high energy **and** diffuse spread → over-inhibitory → preferentially dropped.
-
-### SGridLC
-
-Partitions feature map into $G \times G$ cells. Each cell computes independent EGPG scores → independent drop mask. Separates object (low suppression) from background (high suppression) regions.
-
----
-
-## Checkpoints & Logs
-
-Saved to `./checkpoints/`:
-- `{run_id}_best.pth` — best validation accuracy checkpoint
-- `{run_id}_history.csv` — per-epoch metrics (loss, acc, F1, AUC, ECE)
-
-Run ID format: `{dataset}_{method}_rate{drop_rate}_{layers}_seed{seed}`  
-Example: `cifar100_sdrop_energy_rate0.1_L4_seed0_best.pth`
-
----
 
 ## Citation
 
+If you use this code, please cite the demo paper:
+
 ```bibtex
-@article{lee2026sdrop,
-  title   = {Suppressive Dropout: An Explainable Channel-Selective
-             Regularization Method for Preserving Rare Features},
-  author  = {Lee, Seunghyun},
-  journal = {Neurocomputing},
-  year    = {2026}
+@inproceedings{lee2026sdrop,
+  title     = {{SDrop}: A Demonstration of Explainable Channel-Selective Regularization for Preserving Rare Features},
+  author    = {Lee, Seunghyun},
+  booktitle = {Late-Breaking Work, Demos and Doctoral Consortium, xAI 2026},
+  series    = {CEUR Workshop Proceedings},
+  year      = {2026}
 }
 ```
 
----
+An extended journal version, with Prof. Luca Longo, is in preparation.
 
 ## Contact
 
-Seunghyun Lee — sh200411@korea.ac.kr — Korea University
+Seunghyun Lee, sh200411@korea.ac.kr, Korea University
