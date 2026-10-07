@@ -138,7 +138,7 @@ def compute_score(x: torch.Tensor, score: str = 'egpg', gamma: float = 1.0,
 
 
 def drop_mask_from_scores(scores: torch.Tensor, drop_rate: float,
-                          norm: str = 'max', eps: float = 1e-6) -> torch.Tensor:
+                          norm: str = 'mean', eps: float = 1e-6) -> torch.Tensor:
     """
     norm='max'  : p_drop,c = drop_rate * s_c / max_c(s_c)          (original)
     norm='mean' : p_drop,c = min(1, drop_rate * C * s_c / sum_c s_c)
@@ -235,7 +235,7 @@ class SDrop(nn.Module, DropRateMonitor):
     """
     def __init__(self, drop_rate: float = 0.1, score: str = 'egpg',
                  gamma: float = 1.0, delta: float = 1.0,
-                 peakedness: str = 'max', norm: str = 'max',
+                 peakedness: str = 'max', norm: str = 'mean',
                  grad_mode: str = 'off', grad_ema: float = 0.9,
                  eps: float = 1e-6):
         super().__init__()
@@ -433,7 +433,7 @@ class SGridLC(nn.Module, DropRateMonitor):
     """
     def __init__(self, drop_rate: float = 0.1, grid_size: int = 2,
                  score: str = 'egpg', gamma: float = 1.0, delta: float = 1.0,
-                 peakedness: str = 'max', norm: str = 'max', eps: float = 1e-6):
+                 peakedness: str = 'max', norm: str = 'mean', eps: float = 1e-6):
         super().__init__()
         self.drop_rate = drop_rate
         self.grid_size = grid_size
@@ -503,7 +503,7 @@ _SCORE_OF_METHOD = {
 def build_sdrop(method: str, drop_rate: float = 0.1, grid_size: int = 2,
                 num_classes: int = 100,
                 gamma: float = 1.0, delta: float = 1.0,
-                peakedness: str = 'max', norm: str = 'max',
+                peakedness: str = 'max', norm: str = 'mean',
                 grad_mode: str = 'off') -> nn.Module:
     """
     method: 'none' | 'dropout' | 'sdrop' | 'sdrop_energy'

@@ -1,0 +1,11 @@
+seeds paired: 18
+test-acc crossover (SDrop mean test acc > random from this epoch to the end): 42
+crossover epoch (SDrop train acc first exceeds random, mean curve): 92
+SDrop - random train acc, epoch 10: -1.17 ± 0.38 (n=18, p=4.48e-06)
+epoch 20: -2.65 ± 0.74 (n=18, p=8.25e-07)
+epoch 40: -8.61 ± 1.72 (n=18, p=6.77e-09)
+epoch 100: -1.21 ± 1.11 (n=18, p=0.0347)
+final (ep 200): +0.00 ± 0.01 (n=18, p=0.805)
+final train acc: none 99.98, random 99.98, SDrop 99.98
+SDrop - random test acc, final: +1.36 ± 0.78 (n=18, p=0.00175)
+generalisation gap (train - test) final: random 63.45, SDrop 62.09
