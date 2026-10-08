@@ -94,7 +94,7 @@ def parse_args():
                             'sdrop_class',
                             'sgridlc', 'dropblock', 'senet', 'cbam',
                             'wcd', 'focuseddrop', 'sdrop_gap',
-                            'sdrop_shuffle', 'sdrop_reverse', 'sdrop_cross',
+                            'sdrop_shuffle', 'sdrop_reverse', 'sdrop_cross', 'sdrop_massmatch', 'sdrop_energy_massmatch', 'sdrop_energy_massmatch',
                             'guided_topk', 'guided_dr', 'targeted', 'maxdrop', 'maxdrop_ch',
                             'vit', 'sdrop_vit', 'sdrop_vit_full',
                             'vitb_none', 'vitb_sdrop', 'vitb_sdrop_energy', 'vitb_sdrop_gap',
@@ -238,7 +238,7 @@ def set_seed(seed: int):
 # therefore depend on --norm. Everything else (none, dropout, dropout_std,
 # plain vit) ignores it, so tagging those would only add noise to filenames.
 _SCORE_METHODS = {'sdrop', 'sdrop_energy', 'sdrop_peak', 'sdrop_random',
-                  'sdrop_class', 'sdrop_gap', 'sdrop_shuffle', 'sdrop_reverse', 'sdrop_cross',
+                  'sdrop_class', 'sdrop_gap', 'sdrop_shuffle', 'sdrop_reverse', 'sdrop_cross', 'sdrop_massmatch', 'sdrop_energy_massmatch',
                   'sgridlc', 'sdrop_vit', 'sdrop_vit_full',
                   'vitb_sdrop', 'vitb_sdrop_energy', 'vitb_sdrop_gap', 'vitb_sdrop_random', 'vitb_sdrop_shuffle',
                   'vitbm_sdrop', 'vitbm_sdrop_energy', 'vitbm_sdrop_gap', 'vitbm_sdrop_random', 'vitbm_sdrop_shuffle',
@@ -819,6 +819,9 @@ def main():
         # realised (effective) drop fraction — p_base is only an upper bound
         # under 'max' normalisation, so we log what actually happened.
         drop_rates = collect_drop_rates(model)
+        for _m in model.modules():   # mass-matched control: log removed mass / channels per epoch (2026-10-07)
+            if hasattr(_m, 'mass_stats'):
+                print("  mass_match: " + "  ".join(f"{k}={v:.4f}" for k, v in _m.mass_stats.items()))
         eff_drop = (sum(drop_rates.values()) / len(drop_rates)) if drop_rates else float('nan')
 
         elapsed = time.time() - t0

@@ -341,7 +341,7 @@ class SDrop(nn.Module, DropRateMonitor):
         #   'cross'   — 확률 벡터를 **배치 축**에서 roll(무작위 offset>=1): 샘플 i 가
         #               다른 샘플 j 의 확률 벡터 전체를 받는다. 채널 순서·예산은
         #               그대로, 자기 입력과의 연결만 끊는다 (cross-sample control).
-        assert assign in ('score', 'shuffle', 'reverse', 'cross'), assign
+        assert assign in ('score', 'shuffle', 'reverse', 'cross', 'massmatch'), assign
         self.assign = assign
         self.gamma = gamma
         self.delta = delta
@@ -446,6 +446,23 @@ class SDrop(nn.Module, DropRateMonitor):
             asc = drop_probs.sort(dim=1).values
             drop_probs = torch.zeros_like(drop_probs).scatter_(1, order, asc)
         mask = _bernoulli_keep(drop_probs)
+        if self.assign == 'massmatch':
+            # Activation-mass-matched random control (Part I confound, 2026-10-07): draw the EGPG mask only to
+            # measure the squared-activation mass it would remove, then drop channels in a random order until the
+            # same mass fraction is removed. Matches removed mass per sample; the channel count is whatever that takes.
+            energy = x.detach().float().pow(2).flatten(2).mean(2)                      # (B, C) raw squared energy
+            total = energy.sum(1, keepdim=True).clamp(min=self.eps)
+            target = ((1.0 - mask.view(mask.shape[0], -1)) * energy).sum(1, keepdim=True) / total   # fraction SDrop removes
+            perm = torch.rand_like(energy).argsort(dim=1)
+            cum = energy.gather(1, perm).cumsum(1) / total
+            ndrop = (cum < target).sum(1, keepdim=True) + 1                              # prefix length reaching the target
+            ndrop = torch.where(target <= 0, torch.zeros_like(ndrop), ndrop).clamp(max=energy.shape[1] - 1)
+            rank = torch.empty_like(perm).scatter_(1, perm, torch.arange(energy.shape[1], device=x.device).expand_as(perm))
+            rmask = (rank >= ndrop).to(x.dtype)                                          # 0 for the first ndrop channels of the permutation
+            removed = ((1.0 - rmask) * energy).sum(1, keepdim=True) / total
+            self.mass_stats = {'sdrop_mass': float(target.mean()), 'random_mass': float(removed.mean()),
+                               'sdrop_channels': float((1.0 - mask.view(mask.shape[0], -1)).mean()), 'random_channels': float((1.0 - rmask).mean())}
+            mask = rmask.view_as(mask)
         self._record(mask)
         if self.rescale:
             # inverted dropout: train/eval 기댓값을 맞춘다. 비교 대상
@@ -684,11 +701,15 @@ _SCORE_OF_METHOD = {
     'sdrop_shuffle': 'egpg',    # control: EGPG 확률 집합을 채널 축에서 permute
     'sdrop_reverse': 'egpg',    # control: EGPG 확률을 점수 역순으로 배정
     'sdrop_cross':   'energy',  # control: energy 확률 벡터를 배치 축에서 roll (다른 샘플 것을 받음)
+    'sdrop_massmatch': 'egpg',
+    'sdrop_energy_massmatch': 'energy',   # same control for the Energy (Waterbirds headline) score  # control (2026-10-07): random channels, per-sample removed L2 mass matched to the EGPG mask
 }
 _ASSIGN_OF_METHOD = {
     'sdrop_shuffle': 'shuffle',
     'sdrop_reverse': 'reverse',
     'sdrop_cross':   'cross',
+    'sdrop_massmatch': 'massmatch',
+    'sdrop_energy_massmatch': 'massmatch',
 }
 
 
