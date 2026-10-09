@@ -1,0 +1,588 @@
+{
+ "erm": {
+  "k": 205,
+  "C": 2048,
+  "n": 5794,
+  "accuracy": {
+   "g0_landbird_land": 99.68957901000977,
+   "g1_landbird_water": 82.3503315448761,
+   "g2_waterbird_land": 58.566975593566895,
+   "g3_waterbird_water": 94.0809965133667,
+   "avg": 87.76320219039917,
+   "worst_group": 58.566975593566895
+  },
+  "overall": {
+   "jaccard": 0.6243271231651306,
+   "inter_frac": 0.7675728797912598,
+   "mass_energy": 0.4472622573375702,
+   "mass_max": 0.4206344783306122,
+   "mass_random": 0.10003689676523209,
+   "n_max_only": 47.64756774902344,
+   "n_energy_only": 47.64756774902344,
+   "n_both": 157.35243225097656,
+   "mass_random_expected": 0.1
+  },
+  "per_group": {
+   "g0_landbird_land": {
+    "jaccard": 0.6269704103469849,
+    "inter_frac": 0.7695939540863037,
+    "mass_energy": 0.44649869203567505,
+    "mass_max": 0.420879602432251,
+    "mass_random": 0.10001827031373978,
+    "n_max_only": 47.23326110839844,
+    "n_energy_only": 47.23326110839844,
+    "n_both": 157.76673889160156
+   },
+   "g1_landbird_water": {
+    "jaccard": 0.6217747330665588,
+    "inter_frac": 0.7656763792037964,
+    "mass_energy": 0.43840715289115906,
+    "mass_max": 0.4117875099182129,
+    "mass_random": 0.10002876073122025,
+    "n_max_only": 48.0363655090332,
+    "n_energy_only": 48.0363655090332,
+    "n_both": 156.96363830566406
+   },
+   "g2_waterbird_land": {
+    "jaccard": 0.6340727806091309,
+    "inter_frac": 0.7748804092407227,
+    "mass_energy": 0.45687323808670044,
+    "mass_max": 0.4310559332370758,
+    "mass_random": 0.09970434755086899,
+    "n_max_only": 46.149532318115234,
+    "n_energy_only": 46.149532318115234,
+    "n_both": 158.8504638671875
+   },
+   "g3_waterbird_water": {
+    "jaccard": 0.6142621636390686,
+    "inter_frac": 0.7598283886909485,
+    "mass_energy": 0.47143635153770447,
+    "mass_max": 0.4404268264770508,
+    "mass_random": 0.1004633903503418,
+    "n_max_only": 49.23520278930664,
+    "n_energy_only": 49.23520278930664,
+    "n_both": 155.76480102539062
+   }
+  },
+  "minority": {
+   "jaccard": 0.6245000958442688,
+   "inter_frac": 0.767716109752655,
+   "mass_energy": 0.4424993693828583,
+   "mass_max": 0.4160575568675995,
+   "mass_random": 0.09995687007904053,
+   "n_max_only": 47.61822509765625,
+   "n_energy_only": 47.61822509765625,
+   "n_both": 157.38177490234375
+  },
+  "channel_stats_by_category": {
+   "overall": {
+    "max_only": {
+     "n_channel_sample_pairs": 276070,
+     "mean_per_sample": 47.64756774902344,
+     "peakedness": 0.14585725963115692,
+     "mean_sq": 1.4320135116577148,
+     "max": 4.3433403968811035,
+     "centre3x3_frac": 0.36585092544555664,
+     "border_ring_frac": 0.2955945134162903
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 276070,
+     "mean_per_sample": 47.64756774902344,
+     "peakedness": 0.06540974229574203,
+     "mean_sq": 2.313369035720825,
+     "max": 3.472417116165161,
+     "centre3x3_frac": 0.3006440997123718,
+     "border_ring_frac": 0.3335359990596771
+    },
+    "both": {
+     "n_channel_sample_pairs": 911700,
+     "mean_per_sample": 157.35243225097656,
+     "peakedness": 0.09535986930131912,
+     "mean_sq": 3.881875991821289,
+     "max": 5.400111675262451,
+     "centre3x3_frac": 0.3901030123233795,
+     "border_ring_frac": 0.25355637073516846
+    }
+   },
+   "minority": {
+    "max_only": {
+     "n_channel_sample_pairs": 137950,
+     "mean_per_sample": 47.61822509765625,
+     "peakedness": 0.14926376938819885,
+     "mean_sq": 1.4759670495986938,
+     "max": 4.477656841278076,
+     "centre3x3_frac": 0.35723382234573364,
+     "border_ring_frac": 0.3122844696044922
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 137950,
+     "mean_per_sample": 47.61822509765625,
+     "peakedness": 0.06675677001476288,
+     "mean_sq": 2.389345407485962,
+     "max": 3.569370746612549,
+     "centre3x3_frac": 0.30363425612449646,
+     "border_ring_frac": 0.3327822685241699
+    },
+    "both": {
+     "n_channel_sample_pairs": 455935,
+     "mean_per_sample": 157.38177490234375,
+     "peakedness": 0.09715649485588074,
+     "mean_sq": 3.9991328716278076,
+     "max": 5.553115367889404,
+     "centre3x3_frac": 0.3912412226200104,
+     "border_ring_frac": 0.25637298822402954
+    }
+   },
+   "g0_landbird_land": {
+    "max_only": {
+     "n_channel_sample_pairs": 106511,
+     "mean_per_sample": 47.23326110839844,
+     "peakedness": 0.14011898636817932,
+     "mean_sq": 1.3603423833847046,
+     "max": 4.1202216148376465,
+     "centre3x3_frac": 0.39188042283058167,
+     "border_ring_frac": 0.2568022906780243
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 106511,
+     "mean_per_sample": 47.23326110839844,
+     "peakedness": 0.06461359560489655,
+     "mean_sq": 2.1567881107330322,
+     "max": 3.3253605365753174,
+     "centre3x3_frac": 0.2975075840950012,
+     "border_ring_frac": 0.33311861753463745
+    },
+    "both": {
+     "n_channel_sample_pairs": 355764,
+     "mean_per_sample": 157.76673889160156,
+     "peakedness": 0.09466121345758438,
+     "mean_sq": 3.635469675064087,
+     "max": 5.168919563293457,
+     "centre3x3_frac": 0.3979116380214691,
+     "border_ring_frac": 0.24117128551006317
+    }
+   },
+   "g1_landbird_water": {
+    "max_only": {
+     "n_channel_sample_pairs": 108322,
+     "mean_per_sample": 48.0363655090332,
+     "peakedness": 0.15163899958133698,
+     "mean_sq": 1.5067212581634521,
+     "max": 4.564301490783691,
+     "centre3x3_frac": 0.3598144054412842,
+     "border_ring_frac": 0.31657543778419495
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 108322,
+     "mean_per_sample": 48.0363655090332,
+     "peakedness": 0.06746448576450348,
+     "mean_sq": 2.446096658706665,
+     "max": 3.6311638355255127,
+     "centre3x3_frac": 0.306258887052536,
+     "border_ring_frac": 0.3315029740333557
+    },
+    "both": {
+     "n_channel_sample_pairs": 353953,
+     "mean_per_sample": 156.96363830566406,
+     "peakedness": 0.09842045605182648,
+     "mean_sq": 4.098711967468262,
+     "max": 5.655595302581787,
+     "centre3x3_frac": 0.3963298499584198,
+     "border_ring_frac": 0.2551223933696747
+    }
+   },
+   "g2_waterbird_land": {
+    "max_only": {
+     "n_channel_sample_pairs": 29628,
+     "mean_per_sample": 46.149532318115234,
+     "peakedness": 0.14057977497577667,
+     "mean_sq": 1.363527536392212,
+     "max": 4.160877704620361,
+     "centre3x3_frac": 0.3477990925312042,
+     "border_ring_frac": 0.2965962588787079
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 29628,
+     "mean_per_sample": 46.149532318115234,
+     "peakedness": 0.06416933238506317,
+     "mean_sq": 2.181858777999878,
+     "max": 3.3434510231018066,
+     "centre3x3_frac": 0.2940383553504944,
+     "border_ring_frac": 0.3374593257904053
+    },
+    "both": {
+     "n_channel_sample_pairs": 101982,
+     "mean_per_sample": 158.8504638671875,
+     "peakedness": 0.09276962280273438,
+     "mean_sq": 3.653520107269287,
+     "max": 5.197434902191162,
+     "centre3x3_frac": 0.3735799491405487,
+     "border_ring_frac": 0.2607134282588959
+    }
+   },
+   "g3_waterbird_water": {
+    "max_only": {
+     "n_channel_sample_pairs": 31609,
+     "mean_per_sample": 49.23520278930664,
+     "peakedness": 0.15032625198364258,
+     "mean_sq": 1.4816944599151611,
+     "max": 4.508979797363281,
+     "centre3x3_frac": 0.31574785709381104,
+     "border_ring_frac": 0.3534713685512543
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 31609,
+     "mean_per_sample": 49.23520278930664,
+     "peakedness": 0.06221366673707962,
+     "mean_sq": 2.5094096660614014,
+     "max": 3.5448155403137207,
+     "centre3x3_frac": 0.298163503408432,
+     "border_ring_frac": 0.3382320702075958
+    },
+    "both": {
+     "n_channel_sample_pairs": 100001,
+     "mean_per_sample": 155.76480102539062,
+     "peakedness": 0.0896541029214859,
+     "mean_sq": 4.223883628845215,
+     "max": 5.525007247924805,
+     "centre3x3_frac": 0.3571333885192871,
+     "border_ring_frac": 0.28477567434310913
+    }
+   }
+  },
+  "selection_coverage": {
+   "overall": {
+    "energy": {
+     "n_channels_ever_selected": 2034,
+     "entropy_nats": 7.359838485717773,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1571.5827094045148,
+     "top20_channels_share_of_selections": 0.04157707467675209,
+     "n_channels_selected_in_over_half_of_samples": 1
+    },
+    "max": {
+     "n_channels_ever_selected": 2035,
+     "entropy_nats": 7.320131301879883,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1510.4022754021657,
+     "top20_channels_share_of_selections": 0.04072589799761772,
+     "n_channels_selected_in_over_half_of_samples": 3
+    },
+    "pearson_corr_of_selection_frequency_between_rules": 0.9377222061157227
+   },
+   "minority": {
+    "energy": {
+     "n_channels_ever_selected": 2030,
+     "entropy_nats": 7.31091833114624,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1496.5508876319257,
+     "top20_channels_share_of_selections": 0.04984466731548309,
+     "n_channels_selected_in_over_half_of_samples": 10
+    },
+    "max": {
+     "n_channels_ever_selected": 2030,
+     "entropy_nats": 7.282901763916016,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1455.2045645506114,
+     "top20_channels_share_of_selections": 0.04754624143242836,
+     "n_channels_selected_in_over_half_of_samples": 9
+    },
+    "pearson_corr_of_selection_frequency_between_rules": 0.9256168603897095
+   }
+  },
+  "channel_stats_note": "centre3x3_frac / border_ring_frac are the fraction of a channel's |x| mass in the centre 3x3 cells / the outer ring of the 7x7 map. They are a crude spatial proxy, NOT a measurement of object vs background content."
+ },
+ "sdrop_topk": {
+  "k": 205,
+  "C": 2048,
+  "n": 5794,
+  "accuracy": {
+   "g0_landbird_land": 99.29046630859375,
+   "g1_landbird_water": 76.8070936203003,
+   "g2_waterbird_land": 71.65108919143677,
+   "g3_waterbird_water": 94.70404982566833,
+   "avg": 86.96928024291992,
+   "worst_group": 71.65108919143677
+  },
+  "overall": {
+   "jaccard": 0.5784458518028259,
+   "inter_frac": 0.7300942540168762,
+   "mass_energy": 0.41861554980278015,
+   "mass_max": 0.3868594765663147,
+   "mass_random": 0.10016728937625885,
+   "n_max_only": 55.3306884765625,
+   "n_energy_only": 55.3306884765625,
+   "n_both": 149.6693115234375,
+   "mass_random_expected": 0.1
+  },
+  "per_group": {
+   "g0_landbird_land": {
+    "jaccard": 0.6140314936637878,
+    "inter_frac": 0.7596777677536011,
+    "mass_energy": 0.4298572540283203,
+    "mass_max": 0.4036217927932739,
+    "mass_random": 0.100179024040699,
+    "n_max_only": 49.266075134277344,
+    "n_energy_only": 49.266075134277344,
+    "n_both": 155.73391723632812
+   },
+   "g1_landbird_water": {
+    "jaccard": 0.5762110948562622,
+    "inter_frac": 0.7284085154533386,
+    "mass_energy": 0.40510040521621704,
+    "mass_max": 0.3740101158618927,
+    "mass_random": 0.10008293390274048,
+    "n_max_only": 55.676273345947266,
+    "n_energy_only": 55.676273345947266,
+    "n_both": 149.32373046875
+   },
+   "g2_waterbird_land": {
+    "jaccard": 0.5564845204353333,
+    "inter_frac": 0.7130765318870544,
+    "mass_energy": 0.42488396167755127,
+    "mass_max": 0.38986706733703613,
+    "mass_random": 0.09997449070215225,
+    "n_max_only": 58.819313049316406,
+    "n_energy_only": 58.819313049316406,
+    "n_both": 146.18067932128906
+   },
+   "g3_waterbird_water": {
+    "jaccard": 0.4832635819911957,
+    "inter_frac": 0.649122416973114,
+    "mass_energy": 0.42033228278160095,
+    "mass_max": 0.3701075613498688,
+    "mass_random": 0.10061517357826233,
+    "n_max_only": 71.9299087524414,
+    "n_energy_only": 71.9299087524414,
+    "n_both": 133.07009887695312
+   }
+  },
+  "minority": {
+   "jaccard": 0.5718395709991455,
+   "inter_frac": 0.725010871887207,
+   "mass_energy": 0.4094845950603485,
+   "mass_max": 0.37752416729927063,
+   "mass_random": 0.100058913230896,
+   "n_max_only": 56.372798919677734,
+   "n_energy_only": 56.372798919677734,
+   "n_both": 148.627197265625
+  },
+  "channel_stats_by_category": {
+   "overall": {
+    "max_only": {
+     "n_channel_sample_pairs": 320586,
+     "mean_per_sample": 55.3306884765625,
+     "peakedness": 0.15257412195205688,
+     "mean_sq": 1.2825759649276733,
+     "max": 4.2277703285217285,
+     "centre3x3_frac": 0.3397062122821808,
+     "border_ring_frac": 0.34510356187820435
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 320586,
+     "mean_per_sample": 55.3306884765625,
+     "peakedness": 0.0639641135931015,
+     "mean_sq": 2.10786509513855,
+     "max": 3.3062710762023926,
+     "centre3x3_frac": 0.2906892001628876,
+     "border_ring_frac": 0.3490987718105316
+    },
+    "both": {
+     "n_channel_sample_pairs": 867184,
+     "mean_per_sample": 149.6693115234375,
+     "peakedness": 0.09666608273983002,
+     "mean_sq": 3.388716220855713,
+     "max": 5.128973960876465,
+     "centre3x3_frac": 0.3821111023426056,
+     "border_ring_frac": 0.272706001996994
+    }
+   },
+   "minority": {
+    "max_only": {
+     "n_channel_sample_pairs": 163312,
+     "mean_per_sample": 56.372798919677734,
+     "peakedness": 0.15755823254585266,
+     "mean_sq": 1.296334981918335,
+     "max": 4.3681488037109375,
+     "centre3x3_frac": 0.32459551095962524,
+     "border_ring_frac": 0.3752381205558777
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 163312,
+     "mean_per_sample": 56.372798919677734,
+     "peakedness": 0.06636752188205719,
+     "mean_sq": 2.148765802383423,
+     "max": 3.40322208404541,
+     "centre3x3_frac": 0.2924893796443939,
+     "border_ring_frac": 0.3541405498981476
+    },
+    "both": {
+     "n_channel_sample_pairs": 430573,
+     "mean_per_sample": 148.627197265625,
+     "peakedness": 0.10023067891597748,
+     "mean_sq": 3.4340829849243164,
+     "max": 5.273625373840332,
+     "centre3x3_frac": 0.3865821659564972,
+     "border_ring_frac": 0.27920737862586975
+    }
+   },
+   "g0_landbird_land": {
+    "max_only": {
+     "n_channel_sample_pairs": 111095,
+     "mean_per_sample": 49.266075134277344,
+     "peakedness": 0.13902710378170013,
+     "mean_sq": 1.370604395866394,
+     "max": 4.114282131195068,
+     "centre3x3_frac": 0.4058602750301361,
+     "border_ring_frac": 0.24372541904449463
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 111095,
+     "mean_per_sample": 49.266075134277344,
+     "peakedness": 0.06414507329463959,
+     "mean_sq": 2.1686129570007324,
+     "max": 3.3183186054229736,
+     "centre3x3_frac": 0.30539005994796753,
+     "border_ring_frac": 0.3191506564617157
+    },
+    "both": {
+     "n_channel_sample_pairs": 351180,
+     "mean_per_sample": 155.73391723632812,
+     "peakedness": 0.09386346489191055,
+     "mean_sq": 3.519655227661133,
+     "max": 5.073237895965576,
+     "centre3x3_frac": 0.40402722358703613,
+     "border_ring_frac": 0.23266719281673431
+    }
+   },
+   "g1_landbird_water": {
+    "max_only": {
+     "n_channel_sample_pairs": 125550,
+     "mean_per_sample": 55.676273345947266,
+     "peakedness": 0.160094752907753,
+     "mean_sq": 1.4205201864242554,
+     "max": 4.630568027496338,
+     "centre3x3_frac": 0.33219531178474426,
+     "border_ring_frac": 0.38325637578964233
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 125550,
+     "mean_per_sample": 55.676273345947266,
+     "peakedness": 0.06821396201848984,
+     "mean_sq": 2.3494298458099365,
+     "max": 3.6100447177886963,
+     "centre3x3_frac": 0.29977983236312866,
+     "border_ring_frac": 0.3523711860179901
+    },
+    "both": {
+     "n_channel_sample_pairs": 336725,
+     "mean_per_sample": 149.32373046875,
+     "peakedness": 0.10320042818784714,
+     "mean_sq": 3.7285571098327637,
+     "max": 5.56910514831543,
+     "centre3x3_frac": 0.4079577624797821,
+     "border_ring_frac": 0.2667725384235382
+    }
+   },
+   "g2_waterbird_land": {
+    "max_only": {
+     "n_channel_sample_pairs": 37762,
+     "mean_per_sample": 58.819313049316406,
+     "peakedness": 0.149124875664711,
+     "mean_sq": 0.8834476470947266,
+     "max": 3.4956648349761963,
+     "centre3x3_frac": 0.2993279993534088,
+     "border_ring_frac": 0.34857916831970215
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 37762,
+     "mean_per_sample": 58.819313049316406,
+     "peakedness": 0.060228534042835236,
+     "mean_sq": 1.481603980064392,
+     "max": 2.715582847595215,
+     "centre3x3_frac": 0.26825016736984253,
+     "border_ring_frac": 0.3600233197212219
+    },
+    "both": {
+     "n_channel_sample_pairs": 93848,
+     "mean_per_sample": 146.18067932128906,
+     "peakedness": 0.08957526087760925,
+     "mean_sq": 2.3775153160095215,
+     "max": 4.213449478149414,
+     "centre3x3_frac": 0.3098868727684021,
+     "border_ring_frac": 0.32382336258888245
+    }
+   },
+   "g3_waterbird_water": {
+    "max_only": {
+     "n_channel_sample_pairs": 46179,
+     "mean_per_sample": 71.9299087524414,
+     "peakedness": 0.16753853857517242,
+     "mean_sq": 1.0221426486968994,
+     "max": 4.0043487548828125,
+     "centre3x3_frac": 0.2339950054883957,
+     "border_ring_frac": 0.48242291808128357
+    },
+    "energy_only": {
+     "n_channel_sample_pairs": 46179,
+     "mean_per_sample": 71.9299087524414,
+     "peakedness": 0.05502914637327194,
+     "mean_sq": 1.8170759677886963,
+     "max": 2.934419631958008,
+     "centre3x3_frac": 0.2489563375711441,
+     "border_ring_frac": 0.4033159017562866
+    },
+    "both": {
+     "n_channel_sample_pairs": 85431,
+     "mean_per_sample": 133.07009887695312,
+     "peakedness": 0.09022115170955658,
+     "mean_sq": 2.6218161582946777,
+     "max": 4.629042148590088,
+     "centre3x3_frac": 0.26948654651641846,
+     "border_ring_frac": 0.40452611446380615
+    }
+   }
+  },
+  "selection_coverage": {
+   "overall": {
+    "energy": {
+     "n_channels_ever_selected": 2039,
+     "entropy_nats": 7.330092906951904,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1525.5234971450075,
+     "top20_channels_share_of_selections": 0.044216472655534744,
+     "n_channels_selected_in_over_half_of_samples": 6
+    },
+    "max": {
+     "n_channels_ever_selected": 2039,
+     "entropy_nats": 7.269162178039551,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1435.3473835691386,
+     "top20_channels_share_of_selections": 0.04378541186451912,
+     "n_channels_selected_in_over_half_of_samples": 4
+    },
+    "pearson_corr_of_selection_frequency_between_rules": 0.9049937129020691
+   },
+   "minority": {
+    "energy": {
+     "n_channels_ever_selected": 2034,
+     "entropy_nats": 7.259805679321289,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1421.980190196408,
+     "top20_channels_share_of_selections": 0.05265665799379349,
+     "n_channels_selected_in_over_half_of_samples": 11
+    },
+    "max": {
+     "n_channels_ever_selected": 2032,
+     "entropy_nats": 7.2178239822387695,
+     "max_entropy_nats": 7.6246189861593985,
+     "effective_n_channels_exp_entropy": 1363.5187890955438,
+     "top20_channels_share_of_selections": 0.04983288049697876,
+     "n_channels_selected_in_over_half_of_samples": 10
+    },
+    "pearson_corr_of_selection_frequency_between_rules": 0.873991847038269
+   }
+  },
+  "channel_stats_note": "centre3x3_frac / border_ring_frac are the fraction of a channel's |x| mass in the centre 3x3 cells / the outer ring of the 7x7 map. They are a crude spatial proxy, NOT a measurement of object vs background content."
+ }
+}
