@@ -1,9 +1,31 @@
 # Suppressive Dropout (SDrop)
-**An Explainable Channel-Selective Regularization Method for Preserving Rare Features**
+**Dropping Dominant Channels Helps Under Data Scarcity and Spurious Correlation**
 
-Seunghyun Lee — Korea University
+Seunghyun Lee (Korea University), with Luca Longo (University College Cork) on the journal revision.
 
-Accepted at **XAI-2026** — *The 4th World Conference on eXplainable Artificial Intelligence* (Demo Track, Paper 8770), Fortaleza, Brazil, July 2026. Extended journal version under preparation for Neurocomputing (Elsevier).
+- Demonstration paper: accepted at **XAI-2026**, the 4th World Conference on eXplainable Artificial Intelligence (Demo Track, Paper 8770), published in CEUR-WS.
+- Journal version: *Neurocomputing* manuscript NEUCOM-D-26-06952, major revision submitted October 2026. The code, run queues, per-seed results and registration documents behind every table of the revision are in [`revision_r1/`](revision_r1/README.md).
+- License: MIT. Cite with the `CITATION.cff` in this repository (a Zenodo DOI will be attached to the first tagged release).
+
+## Reproducing the revision tables (start here)
+
+Every reported run is one `train.py` command in a queue file under `revision_r1/queues/`; the per-seed `*_history.csv` it produces is already in `revision_r1/results/`.
+
+| Table in the revision | Queue file(s) | Analysis script |
+|---|---|---|
+| Table 1, CIFAR-100 with 10% of the training data (18 paired seeds), components, baselines | `revision_r1/queues/run_*cifar*` | `python revision_r1/scripts/neucom_run_analysis.py` |
+| Table 2, Waterbirds worst-group (14 paired seeds), controls, RSC | `revision_r1/queues/run_*wb*` | `python revision_r1/scripts/bh_fdr.py` |
+| Table 3, external datasets registered in advance (ISIC, CCT20, CounterAnimal, in9bg, FairFace, ViT-B) | `revision_r1/queues/run_*` + `revision_r1/code/prep_*.py` | `python revision_r1/scripts/bh_fdr.py` |
+| Figure 3, memorisation delay | same runs as Table 1 | `python revision_r1/scripts/plot_memorisation_delay.py` |
+
+Minimal example (one arm, one seed, CIFAR-100 at 10% data, SDrop at L4):
+
+```bash
+python train.py --dataset cifar100 --subset_frac 0.1 --method sdrop --drop_rate 0.1 --layers L4 --epochs 200 --seed 0
+python train.py --dataset cifar100 --subset_frac 0.1 --method sdrop_random --drop_rate 0.1 --layers L4 --epochs 200 --seed 0
+```
+
+The sections below describe the original (XAI-2026 / first-submission) code paths and are kept for reference; the numbers in "Full Experiment Grid" are the superseded 3-seed results.
 
 ---
 

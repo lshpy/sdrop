@@ -23,6 +23,14 @@ def load(dirs):
                 if n not in best or v > best[n]: best[n] = v
             except Exception:
                 pass
+    # train.py 는 sdrop_* 계열에 항상 _nm{norm} 을 붙인다(기본 mean). norm=max 는
+    # 태그가 없던 시절의 legacy 런과 같은 조건이므로, _nmmax 를 뗀 이름으로도 찾을 수
+    # 있게 별칭을 단다. 진짜 legacy 파일이 있으면 그쪽이 우선이다.
+    for n in list(best):
+        if '_nmmax' in n:
+            alias = n.replace('_nmmax', '')
+            if alias not in best:
+                best[alias] = best[n]
     return best
 
 def agg(best, prefix, seeds=(0,1,2)):

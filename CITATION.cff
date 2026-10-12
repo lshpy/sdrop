@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "Suppressive Dropout (SDrop): code and per-seed results"
+authors:
+  - family-names: Lee
+    given-names: Seunghyun
+    affiliation: "Korea University"
+    orcid: "https://orcid.org/0009-0006-1926-653X"
+repository-code: "https://github.com/lshpy/sdrop"
+license: MIT
+date-released: 2026-10-10
+version: "1.0.0"
+# doi: 10.5281/zenodo.XXXXXXX   <- fill in after the first GitHub release is archived on Zenodo
+preferred-citation:
+  type: article
+  title: "Suppressive Dropout: Dropping Dominant Channels Helps Under Data Scarcity and Spurious Correlation"
+  authors:
+    - family-names: Lee
+      given-names: Seunghyun
+    - family-names: Longo
+      given-names: Luca
+  journal: "Neurocomputing"
+  year: 2026
+  notes: "manuscript NEUCOM-D-26-06952, under revision"
