@@ -5,7 +5,7 @@ Seunghyun Lee (Korea University), with Luca Longo (University College Cork) on t
 
 - Demonstration paper: accepted at **XAI-2026**, the 4th World Conference on eXplainable Artificial Intelligence (Demo Track, Paper 8770), published in CEUR-WS.
 - Journal version: *Neurocomputing* manuscript NEUCOM-D-26-06952, major revision submitted October 2026. The code, run queues, per-seed results and registration documents behind every table of the revision are in [`revision_r1/`](revision_r1/README.md).
-- License: MIT. Cite with the `CITATION.cff` in this repository (a Zenodo DOI will be attached to the first tagged release).
+- License: MIT. Archived on Zenodo: DOI 10.5281/zenodo.23309907. Cite with the `CITATION.cff` in this repository.
 
 ## Reproducing the revision tables (start here)
 

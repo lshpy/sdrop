@@ -8,9 +8,9 @@ authors:
     orcid: "https://orcid.org/0009-0006-1926-653X"
 repository-code: "https://github.com/lshpy/sdrop"
 license: MIT
-date-released: 2026-10-10
-version: "1.0.0"
-# doi: 10.5281/zenodo.XXXXXXX   <- fill in after the first GitHub release is archived on Zenodo
+date-released: 2026-10-12
+version: "1.0.1"
+doi: 10.5281/zenodo.23309907
 preferred-citation:
   type: article
   title: "Suppressive Dropout: Dropping Dominant Channels Helps Under Data Scarcity and Spurious Correlation"
